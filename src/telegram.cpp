@@ -17,6 +17,27 @@ namespace Telegram {
     using nlohmann::json;
 
     const short int MAX_IMAGES_IN_GROUP = 10;
+
+    optional<int64_t> getLatestChatID(const string &botToken) {
+        const string url = "https://api.telegram.org/bot" + botToken + "/getUpdates";
+        const json response = json::parse(getJSONFromURL(url));
+
+        if (!response.value("ok", false) || !response.contains("result")) {
+            return nullopt;
+        }
+
+        const json &updates = response.at("result");
+        for (auto update = updates.rbegin(); update != updates.rend(); ++update) {
+            for (const string &messageType : {"message", "edited_message", "channel_post"}) {
+                if (update->contains(messageType) && update->at(messageType).contains("chat")) {
+                    return update->at(messageType).at("chat").at("id").get<int64_t>();
+                }
+            }
+        }
+
+        return nullopt;
+    }
+
     string makeImageGroupJSON(const vector<string> &images, const string &caption) {
         json j_array = json::array();
         for (int i = 0; (i < images.size()) && (i < MAX_IMAGES_IN_GROUP); i++){

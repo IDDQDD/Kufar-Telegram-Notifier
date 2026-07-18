@@ -289,7 +289,17 @@ int main(int argc, char **argv) {
     }
 
     if (programConfiguration.telegramConfiguration.chatID == 1111111111) {
-        cerr << "[ERROR]: Set TELEGRAM_CHAT_ID before starting the bot." << endl;
+        const optional<int64_t> discoveredChatID = getLatestChatID(
+            programConfiguration.telegramConfiguration.botToken
+        );
+
+        if (discoveredChatID.has_value()) {
+            cout << "[SETUP]: TELEGRAM_CHAT_ID=" << discoveredChatID.value() << endl;
+            cout << "[SETUP]: Add this value to Railway and redeploy the service." << endl;
+            return 0;
+        }
+
+        cerr << "[SETUP]: Send /start to your bot, then redeploy to discover TELEGRAM_CHAT_ID." << endl;
         return 1;
     }
 
