@@ -47,6 +47,7 @@ struct Files {
 struct QuerySubscription {
     int64_t chatID;
     KufarConfiguration query;
+    string cacheKey;
 };
 
 struct RecipientCache {
@@ -117,7 +118,11 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
         
         const auto addSubscriptions = [&](const int64_t chatID, const json &recipientQueries) {
             for (const json &query : recipientQueries) {
-                programConfiguration.subscriptions.push_back({chatID, parseKufarConfiguration(query)});
+                const string cacheKey = query.value(
+                    "cache-key",
+                    query.value("tag", "")
+                );
+                programConfiguration.subscriptions.push_back({chatID, parseKufarConfiguration(query), cacheKey});
             }
         };
 
@@ -376,7 +381,7 @@ int main(int argc, char **argv) {
         for (const auto &subscription : programConfiguration.subscriptions) {
             unsigned int sentCount = 0;
             const auto &requestConfiguration = subscription.query;
-            const string queryKey = requestConfiguration.tag.value_or("");
+            const string &queryKey = subscription.cacheKey;
             RecipientCache &recipientCache = recipientCaches[subscription.chatID];
             const bool queryInitialized = find(
                 recipientCache.initializedQueries.begin(),
