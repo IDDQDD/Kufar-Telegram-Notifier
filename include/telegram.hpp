@@ -8,10 +8,13 @@
 #ifndef Header_hpp
 #define Header_hpp
 
+#include <cstdint>
+#include <string>
+
 namespace Telegram {
     struct TelegramConfiguration {
         std::string botToken;
-        uint64_t chatID;
+        int64_t chatID;
     };
 
     void sendAdvert(const TelegramConfiguration &, const Kufar::Ad &);

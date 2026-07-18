@@ -101,3 +101,7 @@ _deps
 ### Ignore bin folder
 bin/
 
+# Local secrets and runtime data
+.env
+cached-data.json
+

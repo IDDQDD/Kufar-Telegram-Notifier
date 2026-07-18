@@ -10,6 +10,8 @@
 #include <signal.h>
 #include <fstream>
 #include <vector>
+#include <cstdlib>
+#include <filesystem>
 
 #include "json.hpp"
 #include "kufar.hpp"
@@ -54,9 +56,21 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
         json telegramData = data.at("telegram");
         programConfiguration.telegramConfiguration.botToken = telegramData.at("bot-token");
         programConfiguration.telegramConfiguration.chatID = telegramData.at("chat-id");
+
+        if (const char *botToken = getenv("TELEGRAM_BOT_TOKEN")) {
+            programConfiguration.telegramConfiguration.botToken = botToken;
+        }
+
+        if (const char *chatID = getenv("TELEGRAM_CHAT_ID")) {
+            programConfiguration.telegramConfiguration.chatID = stoll(chatID);
+        }
     }
     {
         json queriesData = data.at("queries");
+
+        if (const char *queriesJSON = getenv("KUFAR_QUERIES_JSON")) {
+            queriesData = json::parse(queriesJSON);
+        }
         
         unsigned int index = 0;
         for (const json &query : queriesData) {
@@ -97,13 +111,21 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
             programConfiguration.queryDelaySeconds = delaysData.at("query");
             programConfiguration.loopDelaySeconds = delaysData.at("loop");
         }
+
+        if (const char *queryDelay = getenv("KUFAR_QUERY_DELAY_SECONDS")) {
+            programConfiguration.queryDelaySeconds = stoi(queryDelay);
+        }
+
+        if (const char *loopDelay = getenv("KUFAR_LOOP_DELAY_SECONDS")) {
+            programConfiguration.loopDelaySeconds = stoi(loopDelay);
+        }
     }
 }
 
 void printJSONConfigurationData(const ProgramConfiguration &programConfiguration) {
     cout <<
     "- Telegram:\n"
-        "\t- Токен: " << programConfiguration.telegramConfiguration.botToken << "\n"
+        "\t- Токен: [СКРЫТ]\n"
         "\t- ID Чата: " << programConfiguration.telegramConfiguration.chatID << "\n\n"
     "- Запросы:\n";
     
@@ -206,6 +228,20 @@ Files getFiles(const int &argsCount, char **args) {
         }
         
     }
+
+    if (files.configuration.path.empty()) {
+        if (const char *configurationPath = getenv("KUFAR_CONFIG_PATH")) {
+            files.configuration.path = configurationPath;
+        }
+    }
+
+    if (files.cache.path.empty()) {
+        if (const char *cachePath = getenv("KUFAR_CACHE_PATH")) {
+            files.cache.path = cachePath;
+        } else if (const char *volumePath = getenv("RAILWAY_VOLUME_MOUNT_PATH")) {
+            files.cache.path = string(volumePath) + PATH_SEPARATOR + CACHE_FILE_NAME;
+        }
+    }
     
     if (files.configuration.path.empty() || files.cache.path.empty()) {
         optional<string> applicationDirectory = getWorkingDirectory();
@@ -225,6 +261,15 @@ Files getFiles(const int &argsCount, char **args) {
     }
     
     files.configuration.contents = getJSONDataFromPath(files.configuration.path);
+
+    if (!fileExists(files.cache.path)) {
+        const filesystem::path cachePath(files.cache.path);
+        if (cachePath.has_parent_path()) {
+            filesystem::create_directories(cachePath.parent_path());
+        }
+        saveFile(files.cache.path, "[]");
+    }
+
     files.cache.contents = getJSONDataFromPath(files.cache.path);
     
     return files;
@@ -236,6 +281,18 @@ int main(int argc, char **argv) {
     
     programConfiguration.files = getFiles(argc, argv);
     loadJSONConfigurationData(programConfiguration.files.configuration.contents, programConfiguration);
+
+    if (programConfiguration.telegramConfiguration.botToken.empty() ||
+        programConfiguration.telegramConfiguration.botToken == "1111111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
+        cerr << "[ERROR]: Set TELEGRAM_BOT_TOKEN before starting the bot." << endl;
+        return 1;
+    }
+
+    if (programConfiguration.telegramConfiguration.chatID == 1111111111) {
+        cerr << "[ERROR]: Set TELEGRAM_CHAT_ID before starting the bot." << endl;
+        return 1;
+    }
+
     printJSONConfigurationData(programConfiguration);
 
     viewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
