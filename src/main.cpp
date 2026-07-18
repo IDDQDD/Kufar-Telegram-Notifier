@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <algorithm>
+#include <map>
 
 #include "json.hpp"
 #include "kufar.hpp"
@@ -43,14 +44,55 @@ struct Files {
     CacheFile cache;
 };
 
+struct QuerySubscription {
+    int64_t chatID;
+    KufarConfiguration query;
+};
+
+struct RecipientCache {
+    vector<int> viewedAds;
+    vector<string> initializedQueries;
+};
+
 struct ProgramConfiguration {
-    vector<KufarConfiguration> kufarConfiguration;
+    vector<QuerySubscription> subscriptions;
     TelegramConfiguration telegramConfiguration;
     Files files;
     
     int queryDelaySeconds = 5;
     int loopDelaySeconds = 30;
 };
+
+KufarConfiguration parseKufarConfiguration(const json &query) {
+    KufarConfiguration kufarConfiguration;
+
+    kufarConfiguration.onlyTitleSearch = getOptionalValue<bool>(query, "only-title-search");
+    kufarConfiguration.tag = getOptionalValue<string>(query, "tag");
+    if (query.contains("price")) {
+        json queryPriceData = query.at("price");
+        kufarConfiguration.priceRange.priceMin = getOptionalValue<int>(queryPriceData, "min");
+        kufarConfiguration.priceRange.priceMax = getOptionalValue<int>(queryPriceData, "max");
+    }
+
+    kufarConfiguration.language = getOptionalValue<string>(query, "language");
+    kufarConfiguration.limit = getOptionalValue<int>(query, "limit");
+    kufarConfiguration.currency = getOptionalValue<string>(query, "currency");
+    kufarConfiguration.condition = getOptionalValue<ItemCondition>(query, "condition");
+    kufarConfiguration.sellerType = getOptionalValue<SellerType>(query, "seller-type");
+    kufarConfiguration.kufarDeliveryRequired = getOptionalValue<bool>(query, "kufar-delivery-required");
+    kufarConfiguration.kufarPaymentRequired = getOptionalValue<bool>(query, "kufar-payment-required");
+    kufarConfiguration.kufarHalvaRequired = getOptionalValue<bool>(query, "kufar-halva-required");
+    kufarConfiguration.onlyWithPhotos = getOptionalValue<bool>(query, "only-with-photos");
+    kufarConfiguration.onlyWithVideos = getOptionalValue<bool>(query, "only-with-videos");
+    kufarConfiguration.onlyWithExchangeAvailable = getOptionalValue<bool>(query, "only-with-exchange-available");
+    kufarConfiguration.sortType = getOptionalValue<SortType>(query, "sort-type");
+    kufarConfiguration.category = getOptionalValue<Category>(query, "category");
+    kufarConfiguration.subCategory = getOptionalValue<int>(query, "sub-category");
+    kufarConfiguration.region = getOptionalValue<Region>(query, "region");
+    kufarConfiguration.areas = getOptionalValue<vector<int>>(query, "areas");
+
+    return kufarConfiguration;
+}
 
 void loadJSONConfigurationData(const json &data, ProgramConfiguration &programConfiguration) {
     {
@@ -73,37 +115,19 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
             queriesData = json::parse(queriesJSON);
         }
         
-        unsigned int index = 0;
-        for (const json &query : queriesData) {
-            KufarConfiguration kufarConfiguration;
-            
-            kufarConfiguration.onlyTitleSearch = getOptionalValue<bool>(query, "only-title-search");
-            kufarConfiguration.tag = getOptionalValue<string>(query, "tag");
-            if (query.contains("price")) {
-                json queryPriceData = query.at("price");
-                kufarConfiguration.priceRange.priceMin = getOptionalValue<int>(queryPriceData, "min");
-                kufarConfiguration.priceRange.priceMax = getOptionalValue<int>(queryPriceData, "max");
+        const auto addSubscriptions = [&](const int64_t chatID, const json &recipientQueries) {
+            for (const json &query : recipientQueries) {
+                programConfiguration.subscriptions.push_back({chatID, parseKufarConfiguration(query)});
             }
-            
-            kufarConfiguration.language = getOptionalValue<string>(query, "language");
-            kufarConfiguration.limit = getOptionalValue<int>(query, "limit");
-            kufarConfiguration.currency = getOptionalValue<string>(query, "currency");
-            kufarConfiguration.condition = getOptionalValue<ItemCondition>(query, "condition");
-            kufarConfiguration.sellerType = getOptionalValue<SellerType>(query, "seller-type");
-            kufarConfiguration.kufarDeliveryRequired = getOptionalValue<bool>(query, "kufar-delivery-required");
-            kufarConfiguration.kufarPaymentRequired = getOptionalValue<bool>(query, "kufar-payment-required");
-            kufarConfiguration.kufarHalvaRequired = getOptionalValue<bool>(query, "kufar-halva-required");
-            kufarConfiguration.onlyWithPhotos = getOptionalValue<bool>(query, "only-with-photos");
-            kufarConfiguration.onlyWithVideos = getOptionalValue<bool>(query, "only-with-videos");
-            kufarConfiguration.onlyWithExchangeAvailable = getOptionalValue<bool>(query, "only-with-exchange-available");
-            kufarConfiguration.sortType = getOptionalValue<SortType>(query, "sort-type");
-            kufarConfiguration.category = getOptionalValue<Category>(query, "category");
-            kufarConfiguration.subCategory = getOptionalValue<int>(query, "sub-category");
-            kufarConfiguration.region = getOptionalValue<Region>(query, "region");
-            kufarConfiguration.areas = getOptionalValue<vector<int>>(query, "areas");
-            programConfiguration.kufarConfiguration.push_back(kufarConfiguration);
-            
-            index += 1;
+        };
+
+        if (const char *recipientsJSON = getenv("KUFAR_RECIPIENTS_JSON")) {
+            const json recipients = json::parse(recipientsJSON);
+            for (const json &recipient : recipients) {
+                addSubscriptions(recipient.at("chat-id").get<int64_t>(), recipient.at("queries"));
+            }
+        } else {
+            addSubscriptions(programConfiguration.telegramConfiguration.chatID, queriesData);
         }
     }
     {
@@ -130,8 +154,10 @@ void printJSONConfigurationData(const ProgramConfiguration &programConfiguration
         "\t- ID Чата: " << programConfiguration.telegramConfiguration.chatID << "\n\n"
     "- Запросы:\n";
     
-    for (const auto &query : programConfiguration.kufarConfiguration) {
+    for (const auto &subscription : programConfiguration.subscriptions) {
+        const auto &query = subscription.query;
         cout <<
+        "\t- ID получателя: " << subscription.chatID << "\n"
         "\t- Название: " << query.tag << "\n"
         "\t- Поиск только по заголовку: " << query.onlyTitleSearch << "\n"
         "\t- Цена:\n"
@@ -278,8 +304,7 @@ Files getFiles(const int &argsCount, char **args) {
 
 int main(int argc, char **argv) {
     ProgramConfiguration programConfiguration;
-    vector<int> viewedAds;
-    vector<string> initializedQueries;
+    map<int64_t, RecipientCache> recipientCaches;
     
     programConfiguration.files = getFiles(argc, argv);
     loadJSONConfigurationData(programConfiguration.files.configuration.contents, programConfiguration);
@@ -307,39 +332,71 @@ int main(int argc, char **argv) {
 
     printJSONConfigurationData(programConfiguration);
 
+    vector<int> legacyViewedAds;
+    vector<string> legacyInitializedQueries;
     if (programConfiguration.files.cache.contents.is_array()) {
-        // Backward compatibility with the original cache format.
-        viewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
+        legacyViewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
     } else {
-        viewedAds = programConfiguration.files.cache.contents.value("viewed-ads", vector<int>{});
-        initializedQueries = programConfiguration.files.cache.contents.value("initialized-queries", vector<string>{});
+        legacyViewedAds = programConfiguration.files.cache.contents.value("viewed-ads", vector<int>{});
+        legacyInitializedQueries = programConfiguration.files.cache.contents.value("initialized-queries", vector<string>{});
+
+        if (programConfiguration.files.cache.contents.contains("recipients")) {
+            const json &recipientsCache = programConfiguration.files.cache.contents.at("recipients");
+            for (auto item = recipientsCache.begin(); item != recipientsCache.end(); ++item) {
+                const int64_t chatID = stoll(item.key());
+                recipientCaches[chatID] = {
+                    item.value().value("viewed-ads", vector<int>{}),
+                    item.value().value("initialized-queries", vector<string>{})
+                };
+            }
+        }
+    }
+
+    // Preserve the existing recipient's cache when upgrading from the single-recipient format.
+    if (recipientCaches.find(programConfiguration.telegramConfiguration.chatID) == recipientCaches.end()) {
+        recipientCaches[programConfiguration.telegramConfiguration.chatID] = {
+            legacyViewedAds,
+            legacyInitializedQueries
+        };
     }
 
     const auto saveCache = [&]() {
-        json cacheData = {
-            {"viewed-ads", viewedAds},
-            {"initialized-queries", initializedQueries}
-        };
+        json recipientsCache = json::object();
+        for (const auto &[chatID, recipientCache] : recipientCaches) {
+            recipientsCache[to_string(chatID)] = {
+                {"viewed-ads", recipientCache.viewedAds},
+                {"initialized-queries", recipientCache.initializedQueries}
+            };
+        }
+        json cacheData = {{"recipients", recipientsCache}};
         saveFile(programConfiguration.files.cache.path, cacheData.dump());
     };
 
     while (true) {
-        for (auto requestConfiguration : programConfiguration.kufarConfiguration) {
+        for (const auto &subscription : programConfiguration.subscriptions) {
             unsigned int sentCount = 0;
+            const auto &requestConfiguration = subscription.query;
             const string queryKey = requestConfiguration.tag.value_or("");
-            const bool queryInitialized = find(initializedQueries.begin(), initializedQueries.end(), queryKey) != initializedQueries.end();
+            RecipientCache &recipientCache = recipientCaches[subscription.chatID];
+            const bool queryInitialized = find(
+                recipientCache.initializedQueries.begin(),
+                recipientCache.initializedQueries.end(),
+                queryKey
+            ) != recipientCache.initializedQueries.end();
             
             try {
                 for (const auto &advert : getAds(requestConfiguration)) {
-                    if (!vectorContains(viewedAds, advert.id)) {
-                        viewedAds.push_back(advert.id);
+                    if (!vectorContains(recipientCache.viewedAds, advert.id)) {
+                        recipientCache.viewedAds.push_back(advert.id);
 
                         if (queryInitialized) {
-                            cout << "[New]: Adding [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
+                            cout << "[New]: Adding [Chat ID: " << subscription.chatID << "], [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
                             sentCount += 1;
 
                             try {
-                                sendAdvert(programConfiguration.telegramConfiguration, advert);
+                                TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
+                                telegramConfiguration.chatID = subscription.chatID;
+                                sendAdvert(telegramConfiguration, advert);
                             } catch (const exception &exc) {
                                 cerr << "[ERROR (sendAdvert)]: " << exc.what() << endl;
                             }
@@ -351,9 +408,9 @@ int main(int argc, char **argv) {
                 }
 
                 if (!queryInitialized) {
-                    initializedQueries.push_back(queryKey);
+                    recipientCache.initializedQueries.push_back(queryKey);
                     saveCache();
-                    cout << "[CACHE]: Initial listings stored without Telegram notifications for query: " << queryKey << endl;
+                    cout << "[CACHE]: Initial listings stored without Telegram notifications for chat " << subscription.chatID << ", query: " << queryKey << endl;
                 }
             } catch (const exception &exc) {
                 cerr << "[ERROR (getAds)]: " << exc.what() << endl;
