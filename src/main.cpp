@@ -12,6 +12,7 @@
 #include <vector>
 #include <cstdlib>
 #include <filesystem>
+#include <algorithm>
 
 #include "json.hpp"
 #include "kufar.hpp"
@@ -278,6 +279,7 @@ Files getFiles(const int &argsCount, char **args) {
 int main(int argc, char **argv) {
     ProgramConfiguration programConfiguration;
     vector<int> viewedAds;
+    vector<string> initializedQueries;
     
     programConfiguration.files = getFiles(argc, argv);
     loadJSONConfigurationData(programConfiguration.files.configuration.contents, programConfiguration);
@@ -305,29 +307,53 @@ int main(int argc, char **argv) {
 
     printJSONConfigurationData(programConfiguration);
 
-    viewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
+    if (programConfiguration.files.cache.contents.is_array()) {
+        // Backward compatibility with the original cache format.
+        viewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
+    } else {
+        viewedAds = programConfiguration.files.cache.contents.value("viewed-ads", vector<int>{});
+        initializedQueries = programConfiguration.files.cache.contents.value("initialized-queries", vector<string>{});
+    }
+
+    const auto saveCache = [&]() {
+        json cacheData = {
+            {"viewed-ads", viewedAds},
+            {"initialized-queries", initializedQueries}
+        };
+        saveFile(programConfiguration.files.cache.path, cacheData.dump());
+    };
 
     while (true) {
         for (auto requestConfiguration : programConfiguration.kufarConfiguration) {
             unsigned int sentCount = 0;
+            const string queryKey = requestConfiguration.tag.value_or("");
+            const bool queryInitialized = find(initializedQueries.begin(), initializedQueries.end(), queryKey) != initializedQueries.end();
             
             try {
                 for (const auto &advert : getAds(requestConfiguration)) {
                     if (!vectorContains(viewedAds, advert.id)) {
-                        cout << "[New]: Adding [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
                         viewedAds.push_back(advert.id);
-                        sentCount += 1;
 
-                        try {
-                            sendAdvert(programConfiguration.telegramConfiguration, advert);
-                        } catch (const exception &exc) {
-                            cerr << "[ERROR (sendAdvert)]: " << exc.what() << endl;
+                        if (queryInitialized) {
+                            cout << "[New]: Adding [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
+                            sentCount += 1;
+
+                            try {
+                                sendAdvert(programConfiguration.telegramConfiguration, advert);
+                            } catch (const exception &exc) {
+                                cerr << "[ERROR (sendAdvert)]: " << exc.what() << endl;
+                            }
                         }
-                        
                     } else {
                         //cout << "[Already was!]" << endl;
                     }
                     usleep(300000); // 0.3s
+                }
+
+                if (!queryInitialized) {
+                    initializedQueries.push_back(queryKey);
+                    saveCache();
+                    cout << "[CACHE]: Initial listings stored without Telegram notifications for query: " << queryKey << endl;
                 }
             } catch (const exception &exc) {
                 cerr << "[ERROR (getAds)]: " << exc.what() << endl;
@@ -336,7 +362,7 @@ int main(int argc, char **argv) {
             sleep(programConfiguration.queryDelaySeconds);
             
             if (sentCount > 0) {
-                saveFile(programConfiguration.files.cache.path, ((json)viewedAds).dump());
+                saveCache();
             }
         }
         DEBUG_MSG("[DEBUG]: " << "(LoopDelay) Sleeping for: " << programConfiguration.loopDelaySeconds << "s.");
