@@ -53,6 +53,7 @@ struct QuerySubscription {
     KufarConfiguration query;
     string cacheKey;
     vector<vector<string>> excludedTitleGroups;
+    vector<string> requiredTitlePhrases;
 };
 
 struct RecipientCache {
@@ -101,6 +102,17 @@ bool matchesExcludedTitleGroup(const string &title, const vector<vector<string>>
         return !group.empty() && all_of(group.begin(), group.end(), [&](const string &term) {
             return normalizedTitle.find(normalizeTitle(term)) != string::npos;
         });
+    });
+}
+
+bool matchesRequiredTitlePhrase(const string &title, const vector<string> &requiredTitlePhrases) {
+    if (requiredTitlePhrases.empty()) {
+        return true;
+    }
+
+    const string normalizedTitle = normalizeTitle(title);
+    return any_of(requiredTitlePhrases.begin(), requiredTitlePhrases.end(), [&](const string &phrase) {
+        return !phrase.empty() && normalizedTitle.find(normalizeTitle(phrase)) != string::npos;
     });
 }
 
@@ -188,11 +200,16 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
                     "exclude-title-groups",
                     vector<vector<string>>{}
                 );
+                const vector<string> requiredTitlePhrases = query.value(
+                    "required-title-phrases",
+                    vector<string>{}
+                );
                 programConfiguration.subscriptions.push_back({
                     chatID,
                     parseKufarConfiguration(query),
                     cacheKey,
-                    excludedTitleGroups
+                    excludedTitleGroups,
+                    requiredTitlePhrases
                 });
             }
         };
@@ -479,6 +496,7 @@ int main(int argc, char **argv) {
             unsigned int sentCount = 0;
             unsigned int filteredDemandCount = 0;
             unsigned int filteredTitleCount = 0;
+            unsigned int filteredRequiredPhraseCount = 0;
             bool cacheChanged = false;
             const auto &requestConfiguration = subscription.query;
             const string &queryKey = subscription.cacheKey;
@@ -498,6 +516,11 @@ int main(int argc, char **argv) {
 
                     if (matchesExcludedTitleGroup(advert.title, subscription.excludedTitleGroups)) {
                         filteredTitleCount += 1;
+                        continue;
+                    }
+
+                    if (!matchesRequiredTitlePhrase(advert.title, subscription.requiredTitlePhrases)) {
+                        filteredRequiredPhraseCount += 1;
                         continue;
                     }
 
@@ -562,11 +585,12 @@ int main(int argc, char **argv) {
                 cerr << "[ERROR (getAds)]: " << exc.what() << endl;
             }
 
-            if (filteredDemandCount > 0 || filteredTitleCount > 0) {
+            if (filteredDemandCount > 0 || filteredTitleCount > 0 || filteredRequiredPhraseCount > 0) {
                 cout << "[FILTER]: Chat " << subscription.chatID
                      << ", query=" << queryKey
                      << ", demand=" << filteredDemandCount
-                     << ", title=" << filteredTitleCount << endl;
+                     << ", title=" << filteredTitleCount
+                     << ", required=" << filteredRequiredPhraseCount << endl;
             }
 
             if (cacheChanged || sentCount > 0) {
