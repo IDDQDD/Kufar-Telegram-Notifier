@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <algorithm>
 #include <map>
+#include <sstream>
+#include <ctime>
 #include <codecvt>
 #include <locale>
 
@@ -56,6 +58,7 @@ struct QuerySubscription {
 struct RecipientCache {
     vector<int> viewedAds;
     vector<string> initializedQueries;
+    map<string, int> adPrices;
 };
 
 struct ProgramConfiguration {
@@ -99,6 +102,28 @@ bool matchesExcludedTitleGroup(const string &title, const vector<vector<string>>
             return normalizedTitle.find(normalizeTitle(term)) != string::npos;
         });
     });
+}
+
+bool isStatusCommand(const string &text) {
+    return text == "/status" || text.rfind("/status@", 0) == 0;
+}
+
+string formatElapsed(const time_t timestamp) {
+    if (timestamp <= 0) {
+        return "ещё не завершена";
+    }
+
+    const time_t elapsed = max<time_t>(0, time(nullptr) - timestamp);
+    if (elapsed < 10) {
+        return "только что";
+    }
+    if (elapsed < 60) {
+        return to_string(elapsed) + " сек. назад";
+    }
+    if (elapsed < 3600) {
+        return to_string(elapsed / 60) + " мин. назад";
+    }
+    return to_string(elapsed / 3600) + " ч. назад";
 }
 
 KufarConfiguration parseKufarConfiguration(const json &query) {
@@ -199,64 +224,19 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
 }
 
 void printJSONConfigurationData(const ProgramConfiguration &programConfiguration) {
-    cout <<
-    "- Telegram:\n"
-        "\t- Токен: [СКРЫТ]\n"
-        "\t- ID Чата: " << programConfiguration.telegramConfiguration.chatID << "\n\n"
-    "- Запросы:\n";
-    
+    map<int64_t, size_t> queryCounts;
     for (const auto &subscription : programConfiguration.subscriptions) {
-        const auto &query = subscription.query;
-        cout <<
-        "\t- ID получателя: " << subscription.chatID << "\n"
-        "\t- Название: " << query.tag << "\n"
-        "\t- Поиск только по заголовку: " << query.onlyTitleSearch << "\n"
-        "\t- Цена:\n"
-            "\t\t- Минимальная: " << query.priceRange.priceMin << " BYN\n"
-            "\t\t- Максимальная: " << query.priceRange.priceMax << " BYN\n"
-        "\t- Язык: " << query.language << "\n"
-        "\t- Макс. кол-во объявлений за один запрос: " << query.limit << "\n"
-        "\t- Валюта: " << query.currency << "\n"
-        "\t- Состояние: " << (query.condition.has_value() ?
-             EnumString::itemCondition(query.condition.value()) : PROPERTY_UNDEFINED) << "\n"
-        "\t- Продавец: " << (query.sellerType.has_value() ?
-             EnumString::sellerType(query.sellerType.value()) : PROPERTY_UNDEFINED) << "\n"
-        "\t- Только с Kufar Доставкой: " << query.kufarDeliveryRequired << "\n"
-        "\t- Только с Kufar Оплатой: " << query.kufarPaymentRequired << "\n"
-        "\t- Только с Kufar Рассрочкой (Халва): " << query.kufarPaymentRequired << "\n"
-        "\t- Только с фото: " << query.onlyWithPhotos << "\n"
-        "\t- Только с видео: " << query.onlyWithVideos << "\n"
-        "\t- Только с возможностью обмена: " << query.onlyWithExchangeAvailable << "\n"
-        "\t- Тип сортировки: " << (query.sortType.has_value() ? EnumString::sortType(query.sortType.value()) : PROPERTY_UNDEFINED) << "\n"
-        "\t- Категория: " << (query.category.has_value() ?
-                              EnumString::category(query.category.value()) : PROPERTY_UNDEFINED) << "\n"
-        "\t- Подкатегория: " << (query.subCategory.has_value() ? EnumString::subCategory(query.subCategory.value()) : PROPERTY_UNDEFINED) << "\n"
-        "\t- Город: " << (query.region.has_value() ? EnumString::region(query.region.value()) : PROPERTY_UNDEFINED)<< "\n"
-        "\t- Групп исключения из заголовка: " << subscription.excludedTitleGroups.size() << "\n"
-        "\t- Район: ";
-        
-        if (query.areas.has_value()) {
-            unsigned int currentIndex = 0;
-            const uint64_t &vectorSize = query.areas.value().size();
-            
-            for (const auto &area : query.areas.value()){
-                cout << EnumString::area(area);
-                
-                if (currentIndex++ < vectorSize - 1) {
-                    cout << ", ";
-                }
-            }
-        } else {
-            cout << PROPERTY_UNDEFINED;
-        }
-        
-        cout << "\n\n";
+        queryCounts[subscription.chatID] += 1;
     }
-    
-    cout <<
-    "- Задержки:\n"
-        "\t- Перед новым запросом: " << programConfiguration.queryDelaySeconds << "с. \n"
-        "\t- После прохода всего списка запросов: " << programConfiguration.loopDelaySeconds << "c." << endl;
+
+    cout << "[CONFIG]: Recipients=" << queryCounts.size()
+         << ", queries=" << programConfiguration.subscriptions.size()
+         << ", query-delay=" << programConfiguration.queryDelaySeconds << "s"
+         << ", loop-delay=" << programConfiguration.loopDelaySeconds << "s" << endl;
+
+    for (const auto &[chatID, count] : queryCounts) {
+        cout << "[CONFIG]: Chat " << chatID << ", queries=" << count << endl;
+    }
 }
 
 json getJSONDataFromPath(const string &JSONFilePath) {
@@ -386,11 +366,15 @@ int main(int argc, char **argv) {
 
     vector<int> legacyViewedAds;
     vector<string> legacyInitializedQueries;
+    map<string, int> legacyAdPrices;
+    int64_t telegramUpdateOffset = 0;
     if (programConfiguration.files.cache.contents.is_array()) {
         legacyViewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
     } else {
         legacyViewedAds = programConfiguration.files.cache.contents.value("viewed-ads", vector<int>{});
         legacyInitializedQueries = programConfiguration.files.cache.contents.value("initialized-queries", vector<string>{});
+        legacyAdPrices = programConfiguration.files.cache.contents.value("ad-prices", map<string, int>{});
+        telegramUpdateOffset = programConfiguration.files.cache.contents.value("telegram-update-offset", int64_t{0});
 
         if (programConfiguration.files.cache.contents.contains("recipients")) {
             const json &recipientsCache = programConfiguration.files.cache.contents.at("recipients");
@@ -398,7 +382,8 @@ int main(int argc, char **argv) {
                 const int64_t chatID = stoll(item.key());
                 recipientCaches[chatID] = {
                     item.value().value("viewed-ads", vector<int>{}),
-                    item.value().value("initialized-queries", vector<string>{})
+                    item.value().value("initialized-queries", vector<string>{}),
+                    item.value().value("ad-prices", map<string, int>{})
                 };
             }
         }
@@ -408,7 +393,8 @@ int main(int argc, char **argv) {
     if (recipientCaches.find(programConfiguration.telegramConfiguration.chatID) == recipientCaches.end()) {
         recipientCaches[programConfiguration.telegramConfiguration.chatID] = {
             legacyViewedAds,
-            legacyInitializedQueries
+            legacyInitializedQueries,
+            legacyAdPrices
         };
     }
 
@@ -417,16 +403,83 @@ int main(int argc, char **argv) {
         for (const auto &[chatID, recipientCache] : recipientCaches) {
             recipientsCache[to_string(chatID)] = {
                 {"viewed-ads", recipientCache.viewedAds},
-                {"initialized-queries", recipientCache.initializedQueries}
+                {"initialized-queries", recipientCache.initializedQueries},
+                {"ad-prices", recipientCache.adPrices}
             };
         }
-        json cacheData = {{"recipients", recipientsCache}};
+        json cacheData = {
+            {"recipients", recipientsCache},
+            {"telegram-update-offset", telegramUpdateOffset}
+        };
         saveFile(programConfiguration.files.cache.path, cacheData.dump());
     };
+
+    map<int64_t, size_t> queryCounts;
+    map<int64_t, time_t> lastSuccessfulCheckByChat;
+    for (const auto &subscription : programConfiguration.subscriptions) {
+        queryCounts[subscription.chatID] += 1;
+        recipientCaches[subscription.chatID];
+    }
+
+    const auto pollStatusCommands = [&]() {
+        try {
+            const vector<TelegramUpdate> updates = getUpdates(
+                programConfiguration.telegramConfiguration.botToken,
+                telegramUpdateOffset
+            );
+            bool offsetChanged = false;
+
+            for (const TelegramUpdate &update : updates) {
+                if (update.updateID >= telegramUpdateOffset) {
+                    telegramUpdateOffset = update.updateID + 1;
+                    offsetChanged = true;
+                }
+
+                const auto queryCount = queryCounts.find(update.chatID);
+                if (!isStatusCommand(update.text) || queryCount == queryCounts.end()) {
+                    continue;
+                }
+
+                TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
+                telegramConfiguration.chatID = update.chatID;
+
+                ostringstream status;
+                status << "✅ Бот работает\n\n"
+                       << "Активных запросов: " << queryCount->second << "\n"
+                       << "Последняя успешная проверка: "
+                       << formatElapsed(lastSuccessfulCheckByChat[update.chatID]) << "\n"
+                       << "Объявлений в кэше: "
+                       << recipientCaches[update.chatID].viewedAds.size();
+
+                sendTextMessage(telegramConfiguration, status.str());
+                cout << "[STATUS]: Replied to chat " << update.chatID << endl;
+            }
+
+            if (offsetChanged) {
+                saveCache();
+            }
+        } catch (const exception &exc) {
+            cerr << "[ERROR (Telegram status)]: " << exc.what() << endl;
+        }
+    };
+
+    const auto sleepWithStatusPolling = [&](int seconds) {
+        while (seconds > 0) {
+            const int chunk = min(seconds, 5);
+            sleep(chunk);
+            seconds -= chunk;
+            pollStatusCommands();
+        }
+    };
+
+    pollStatusCommands();
 
     while (true) {
         for (const auto &subscription : programConfiguration.subscriptions) {
             unsigned int sentCount = 0;
+            unsigned int filteredDemandCount = 0;
+            unsigned int filteredTitleCount = 0;
+            bool cacheChanged = false;
             const auto &requestConfiguration = subscription.query;
             const string &queryKey = subscription.cacheKey;
             RecipientCache &recipientCache = recipientCaches[subscription.chatID];
@@ -439,17 +492,20 @@ int main(int argc, char **argv) {
             try {
                 for (const auto &advert : getAds(requestConfiguration)) {
                     if (advert.isDemand) {
-                        cout << "[FILTER]: Skipping demand listing [Title: " << advert.title << "], [ID: " << advert.id << "]" << endl;
+                        filteredDemandCount += 1;
                         continue;
                     }
 
                     if (matchesExcludedTitleGroup(advert.title, subscription.excludedTitleGroups)) {
-                        cout << "[FILTER]: Skipping listing by title exclusion [Title: " << advert.title << "], [ID: " << advert.id << "]" << endl;
+                        filteredTitleCount += 1;
                         continue;
                     }
 
+                    const string advertID = to_string(advert.id);
                     if (!vectorContains(recipientCache.viewedAds, advert.id)) {
                         recipientCache.viewedAds.push_back(advert.id);
+                        recipientCache.adPrices[advertID] = advert.price;
+                        cacheChanged = true;
 
                         if (queryInitialized) {
                             cout << "[New]: Adding [Chat ID: " << subscription.chatID << "], [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
@@ -459,33 +515,68 @@ int main(int argc, char **argv) {
                                 TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                                 telegramConfiguration.chatID = subscription.chatID;
                                 sendAdvert(telegramConfiguration, advert);
+                                usleep(300000); // Keep Telegram sends gently rate-limited.
                             } catch (const exception &exc) {
                                 cerr << "[ERROR (sendAdvert)]: " << exc.what() << endl;
                             }
                         }
                     } else {
-                        //cout << "[Already was!]" << endl;
+                        const auto previousPrice = recipientCache.adPrices.find(advertID);
+                        if (previousPrice == recipientCache.adPrices.end()) {
+                            // Migration from the old cache format: establish a baseline silently.
+                            recipientCache.adPrices[advertID] = advert.price;
+                            cacheChanged = true;
+                        } else if (previousPrice->second != advert.price) {
+                            const int oldPrice = previousPrice->second;
+                            previousPrice->second = advert.price;
+                            cacheChanged = true;
+
+                            if (queryInitialized && advert.price < oldPrice) {
+                                cout << "[PRICE DROP]: Chat " << subscription.chatID
+                                     << ", ad=" << advert.id
+                                     << ", old=" << oldPrice
+                                     << ", new=" << advert.price << endl;
+                                sentCount += 1;
+
+                                try {
+                                    TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
+                                    telegramConfiguration.chatID = subscription.chatID;
+                                    sendPriceDrop(telegramConfiguration, advert, oldPrice);
+                                    usleep(300000);
+                                } catch (const exception &exc) {
+                                    cerr << "[ERROR (sendPriceDrop)]: " << exc.what() << endl;
+                                }
+                            }
+                        }
                     }
-                    usleep(300000); // 0.3s
                 }
+
+                lastSuccessfulCheckByChat[subscription.chatID] = time(nullptr);
 
                 if (!queryInitialized) {
                     recipientCache.initializedQueries.push_back(queryKey);
-                    saveCache();
+                    cacheChanged = true;
                     cout << "[CACHE]: Initial listings stored without Telegram notifications for chat " << subscription.chatID << ", query: " << queryKey << endl;
                 }
             } catch (const exception &exc) {
                 cerr << "[ERROR (getAds)]: " << exc.what() << endl;
             }
-            DEBUG_MSG("[DEBUG]: " << "(QueryDelay) Sleeping for: " << programConfiguration.queryDelaySeconds << "s.");
-            sleep(programConfiguration.queryDelaySeconds);
-            
-            if (sentCount > 0) {
+
+            if (filteredDemandCount > 0 || filteredTitleCount > 0) {
+                cout << "[FILTER]: Chat " << subscription.chatID
+                     << ", query=" << queryKey
+                     << ", demand=" << filteredDemandCount
+                     << ", title=" << filteredTitleCount << endl;
+            }
+
+            if (cacheChanged || sentCount > 0) {
                 saveCache();
             }
+
+            pollStatusCommands();
+            sleepWithStatusPolling(programConfiguration.queryDelaySeconds);
         }
-        DEBUG_MSG("[DEBUG]: " << "(LoopDelay) Sleeping for: " << programConfiguration.loopDelaySeconds << "s.");
-        sleep(programConfiguration.loopDelaySeconds);
+        sleepWithStatusPolling(programConfiguration.loopDelaySeconds);
     }
     return 0;
 }

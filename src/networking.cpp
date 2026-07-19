@@ -30,7 +30,8 @@ namespace Networking {
     }
 
     string getJSONFromURL(const string &url) {
-        DEBUG_MSG("[URL: " << url << "]");
+        // URLs may contain the Telegram bot token, so never print them.
+        DEBUG_MSG("[HTTP GET]");
         
         //curl_global_init(CURL_GLOBAL_DEFAULT);
         auto curl = curl_easy_init();

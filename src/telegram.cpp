@@ -6,6 +6,9 @@
 //
 
 #include <iostream>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
 #include "kufar.hpp"
 #include "telegram.hpp"
 #include "networking.hpp"
@@ -17,6 +20,20 @@ namespace Telegram {
     using nlohmann::json;
 
     const short int MAX_IMAGES_IN_GROUP = 10;
+
+    namespace {
+        string formatPrice(const int price) {
+            ostringstream stream;
+            stream << price / 100;
+
+            const int cents = price % 100;
+            if (cents != 0) {
+                stream << '.' << setw(2) << setfill('0') << cents;
+            }
+
+            return stream.str() + " BYN";
+        }
+    }
 
     optional<int64_t> getLatestChatID(const string &botToken) {
         const string url = "https://api.telegram.org/bot" + botToken + "/getUpdates";
@@ -36,6 +53,49 @@ namespace Telegram {
         }
 
         return nullopt;
+    }
+
+    vector<TelegramUpdate> getUpdates(const string &botToken, const int64_t offset) {
+        const string url = "https://api.telegram.org/bot" + botToken +
+                           "/getUpdates?timeout=0&offset=" + to_string(offset);
+        const json response = json::parse(getJSONFromURL(url));
+
+        if (!response.value("ok", false) || !response.contains("result")) {
+            throw runtime_error("Telegram getUpdates returned an invalid response");
+        }
+
+        vector<TelegramUpdate> result;
+        for (const json &update : response.at("result")) {
+            if (!update.contains("update_id")) {
+                continue;
+            }
+
+            TelegramUpdate parsedUpdate = {
+                update.at("update_id").get<int64_t>(),
+                0,
+                ""
+            };
+
+            if (update.contains("message")) {
+                const json &message = update.at("message");
+                if (message.contains("chat") && message.contains("text")) {
+                    parsedUpdate.chatID = message.at("chat").at("id").get<int64_t>();
+                    parsedUpdate.text = message.at("text").get<string>();
+                }
+            }
+
+            result.push_back(parsedUpdate);
+        }
+
+        return result;
+    }
+
+    void sendTextMessage(const TelegramConfiguration &telegramConfiguration, const string &text) {
+        const string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken +
+                           "/sendMessage?chat_id=" + to_string(telegramConfiguration.chatID) +
+                           "&text=" + urlEncode(text) +
+                           "&disable_web_page_preview=true";
+        getJSONFromURL(url);
     }
 
     string makeImageGroupJSON(const vector<string> &images, const string &caption) {
@@ -67,7 +127,7 @@ namespace Telegram {
         
         text += "Название: " + ad.title + "\n"
                 "Дата: " + formattedTime + "\n"
-                "Цена: " + to_string(ad.price / 100) + " BYN\n\n"
+                "Цена: " + formatPrice(ad.price) + "\n\n"
                 "Имя продавца: " + ad.sellerName + "\n"
                 "Номер телефона не скрыт: " + (ad.phoneNumberIsVisible ? "Да" : "Нет") + "\n"
                 "Ссылка: " + ad.link;
@@ -85,5 +145,21 @@ namespace Telegram {
         }
         
         getJSONFromURL(url);
+    }
+
+    void sendPriceDrop(
+        const TelegramConfiguration &telegramConfiguration,
+        const Kufar::Ad &ad,
+        const int previousPrice
+    ) {
+        const int difference = previousPrice - ad.price;
+        string text = "💸 Цена снижена\n\n"
+                      "Название: " + ad.title + "\n"
+                      "Было: " + formatPrice(previousPrice) + "\n"
+                      "Стало: " + formatPrice(ad.price) + "\n"
+                      "Снижение: " + formatPrice(difference) + "\n\n"
+                      "Ссылка: " + ad.link;
+
+        sendTextMessage(telegramConfiguration, text);
     }
 };
