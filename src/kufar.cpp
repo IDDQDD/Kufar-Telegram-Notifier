@@ -176,7 +176,9 @@ namespace Kufar {
         
         if (configuration.sortType.has_value()) { addURLParameter(urlStream, "sort", getSortTypeUrlParameter(configuration.sortType.value())); }
         if (configuration.condition.has_value()) { addURLParameter(urlStream, "cnd", int(configuration.condition.value())); }
-        if (configuration.sellerType.has_value()) { addURLParameterBoolean(urlStream, "cmp", int(configuration.sellerType.value())); }
+        if (configuration.sellerType.has_value()) {
+            addURLParameter(urlStream, "cmp", to_string(int(configuration.sellerType.value())));
+        }
         if (configuration.region.has_value()) { addURLParameter(urlStream, "rgn", int(configuration.region.value())); }
         if (configuration.areas.has_value()) { addURLParameter(urlStream, "ar", "v.or:" + joinIntVector(configuration.areas.value(), ",")); }
             
