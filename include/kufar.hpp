@@ -501,6 +501,7 @@ namespace Kufar {
         int price;
         std::string sellerName;
         bool phoneNumberIsVisible;
+        bool isDemand = false;
         std::string link;
         std::vector<std::string> images;
     };

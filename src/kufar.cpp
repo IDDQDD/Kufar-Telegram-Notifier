@@ -10,6 +10,8 @@
 #include "networking.hpp"
 #include "helperfunctions.hpp"
 #include <iostream>
+#include <algorithm>
+#include <cctype>
 
 namespace Kufar {
 
@@ -49,6 +51,67 @@ namespace Kufar {
     }
 
     namespace {
+        constexpr int DEMAND_CATEGORY_ID = 7040;
+
+        string asciiLower(string value) {
+            transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+                return static_cast<char>(tolower(character));
+            });
+            return value;
+        }
+
+        bool isCategoryKey(const string &key) {
+            const string normalizedKey = asciiLower(key);
+            return normalizedKey == "cat" ||
+                   normalizedKey.rfind("cat_", 0) == 0 ||
+                   normalizedKey.find("category") != string::npos;
+        }
+
+        bool containsDemandMarker(const json &value) {
+            if (value.is_number_integer() || value.is_number_unsigned()) {
+                return value.get<long long>() == DEMAND_CATEGORY_ID;
+            }
+
+            if (value.is_string()) {
+                const string text = value.get<string>();
+                return text == to_string(DEMAND_CATEGORY_ID) ||
+                       text == "Спрос" || text == "спрос";
+            }
+
+            if (value.is_array() || value.is_object()) {
+                return any_of(value.begin(), value.end(), [](const json &item) {
+                    return containsDemandMarker(item);
+                });
+            }
+
+            return false;
+        }
+
+        bool containsDemandCategory(const json &value) {
+            if (value.is_array()) {
+                return any_of(value.begin(), value.end(), [](const json &item) {
+                    return containsDemandCategory(item);
+                });
+            }
+
+            if (!value.is_object()) {
+                return false;
+            }
+
+            for (auto item = value.begin(); item != value.end(); ++item) {
+                if (isCategoryKey(item.key()) && containsDemandMarker(item.value())) {
+                    return true;
+                }
+
+                if ((item.value().is_object() || item.value().is_array()) &&
+                    containsDemandCategory(item.value())) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         void insertImageURL (vector<string> &images, const string &id, const bool yams_storage) {
             if (yams_storage) {
                 images.push_back("https://yams.kufar.by/api/v1/kufar-ads/images/" + id.substr(0, 2) + "/" + id + ".jpg?rule=pictures");
@@ -133,6 +196,7 @@ namespace Kufar {
             advert.date = timestampShift(zuluToTimestamp((string)ad.at("list_time")), 3);
             advert.price = stoi((string)ad.at("price_byn"));
             advert.phoneNumberIsVisible = !ad.at("phone_hidden");
+            advert.isDemand = containsDemandCategory(ad);
             advert.link = ad.at("ad_link");
             
             json accountParameters = ad.at("account_parameters");

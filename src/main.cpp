@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <algorithm>
 #include <map>
+#include <codecvt>
+#include <locale>
 
 #include "json.hpp"
 #include "kufar.hpp"
@@ -48,6 +50,7 @@ struct QuerySubscription {
     int64_t chatID;
     KufarConfiguration query;
     string cacheKey;
+    vector<vector<string>> excludedTitleGroups;
 };
 
 struct RecipientCache {
@@ -63,6 +66,40 @@ struct ProgramConfiguration {
     int queryDelaySeconds = 5;
     int loopDelaySeconds = 30;
 };
+
+string normalizeTitle(const string &value) {
+    wstring_convert<codecvt_utf8<wchar_t>> converter;
+    wstring normalized = converter.from_bytes(value);
+
+    transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t character) {
+        if (character == L'Ё' || character == L'ё') {
+            return L'е';
+        }
+        if (character >= L'А' && character <= L'Я') {
+            return static_cast<wchar_t>(character + (L'а' - L'А'));
+        }
+        if (character >= L'A' && character <= L'Z') {
+            return static_cast<wchar_t>(character + (L'a' - L'A'));
+        }
+        return character;
+    });
+
+    return converter.to_bytes(normalized);
+}
+
+bool matchesExcludedTitleGroup(const string &title, const vector<vector<string>> &excludedTitleGroups) {
+    if (excludedTitleGroups.empty()) {
+        return false;
+    }
+
+    const string normalizedTitle = normalizeTitle(title);
+
+    return any_of(excludedTitleGroups.begin(), excludedTitleGroups.end(), [&](const vector<string> &group) {
+        return !group.empty() && all_of(group.begin(), group.end(), [&](const string &term) {
+            return normalizedTitle.find(normalizeTitle(term)) != string::npos;
+        });
+    });
+}
 
 KufarConfiguration parseKufarConfiguration(const json &query) {
     KufarConfiguration kufarConfiguration;
@@ -122,7 +159,16 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
                     "cache-key",
                     query.value("tag", "")
                 );
-                programConfiguration.subscriptions.push_back({chatID, parseKufarConfiguration(query), cacheKey});
+                const vector<vector<string>> excludedTitleGroups = query.value(
+                    "exclude-title-groups",
+                    vector<vector<string>>{}
+                );
+                programConfiguration.subscriptions.push_back({
+                    chatID,
+                    parseKufarConfiguration(query),
+                    cacheKey,
+                    excludedTitleGroups
+                });
             }
         };
 
@@ -186,6 +232,7 @@ void printJSONConfigurationData(const ProgramConfiguration &programConfiguration
                               EnumString::category(query.category.value()) : PROPERTY_UNDEFINED) << "\n"
         "\t- Подкатегория: " << (query.subCategory.has_value() ? EnumString::subCategory(query.subCategory.value()) : PROPERTY_UNDEFINED) << "\n"
         "\t- Город: " << (query.region.has_value() ? EnumString::region(query.region.value()) : PROPERTY_UNDEFINED)<< "\n"
+        "\t- Групп исключения из заголовка: " << subscription.excludedTitleGroups.size() << "\n"
         "\t- Район: ";
         
         if (query.areas.has_value()) {
@@ -391,6 +438,16 @@ int main(int argc, char **argv) {
             
             try {
                 for (const auto &advert : getAds(requestConfiguration)) {
+                    if (advert.isDemand) {
+                        cout << "[FILTER]: Skipping demand listing [Title: " << advert.title << "], [ID: " << advert.id << "]" << endl;
+                        continue;
+                    }
+
+                    if (matchesExcludedTitleGroup(advert.title, subscription.excludedTitleGroups)) {
+                        cout << "[FILTER]: Skipping listing by title exclusion [Title: " << advert.title << "], [ID: " << advert.id << "]" << endl;
+                        continue;
+                    }
+
                     if (!vectorContains(recipientCache.viewedAds, advert.id)) {
                         recipientCache.viewedAds.push_back(advert.id);
 
