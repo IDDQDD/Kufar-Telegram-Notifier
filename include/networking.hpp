@@ -11,6 +11,7 @@
 namespace Networking {
     std::string urlEncode(const std::string &);
     std::string getJSONFromURL(const std::string &);
+    std::string postJSONToURL(const std::string &, const std::string &);
 };
 
 #endif /* networking_hpp */

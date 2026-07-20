@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <map>
+#include <set>
 #include <sstream>
 #include <ctime>
 #include <codecvt>
@@ -54,6 +55,29 @@ struct QuerySubscription {
     string cacheKey;
     vector<vector<string>> excludedTitleGroups;
     vector<string> requiredTitlePhrases;
+    json sourceQuery;
+};
+
+enum class MenuStep {
+    idle,
+    waitingForQuery,
+    waitingForCategory,
+    waitingForDelete,
+    waitingForDeleteConfirmation
+};
+
+struct MenuState {
+    MenuStep step = MenuStep::idle;
+    string pendingTag;
+    string pendingDeleteQuery;
+};
+
+struct CategoryChoice {
+    string button;
+    string name;
+    optional<Category> category;
+    optional<int> subCategory;
+    bool automatic = false;
 };
 
 struct RecipientCache {
@@ -216,6 +240,202 @@ KufarConfiguration parseKufarConfiguration(const json &query) {
     return kufarConfiguration;
 }
 
+QuerySubscription makeSubscription(const int64_t chatID, const json &query) {
+    return {
+        chatID,
+        parseKufarConfiguration(query),
+        query.value("cache-key", query.value("tag", "")),
+        query.value("exclude-title-groups", vector<vector<string>>{}),
+        query.value("required-title-phrases", vector<string>{}),
+        query
+    };
+}
+
+string trimText(const string &value) {
+    const size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == string::npos) {
+        return "";
+    }
+    const size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+bool isTelegramCommand(const string &text, const string &command) {
+    return text == command || text.rfind(command + "@", 0) == 0;
+}
+
+const vector<CategoryChoice> &categoryChoices() {
+    static const vector<CategoryChoice> choices = {
+        {u8"✨ Подобрать автоматически", u8"Автоматически", nullopt, nullopt, true},
+        {u8"🌐 Все категории", u8"Все категории", nullopt, nullopt, false},
+        {u8"🏋️ Спорттовары", u8"Спорттовары", Category::hobbiesSportsAndTourism,
+            int(SubCategories::HobbiesSportsAndTourism::sportGoods), false},
+        {u8"🔌 Электроника", u8"Электроника", Category::electronics, nullopt, false},
+        {u8"🏠 Бытовая техника", u8"Бытовая техника", Category::householdAppliances, nullopt, false},
+        {u8"🛠 Ремонт и стройка", u8"Ремонт и стройка", Category::repairAndBuilding, nullopt, false},
+        {u8"🛋 Всё для дома", u8"Всё для дома", Category::everythingForHome, nullopt, false},
+        {u8"🚗 Авто", u8"Авто", Category::carsAndTransport, nullopt, false},
+        {u8"🏢 Недвижимость", u8"Недвижимость", Category::realEstate, nullopt, false},
+        {u8"🎨 Хобби и спорт", u8"Хобби и спорт", Category::hobbiesSportsAndTourism, nullopt, false},
+        {u8"🏭 Оборудование", u8"Оборудование", Category::readyBusinessAndEquipment, nullopt, false}
+    };
+    return choices;
+}
+
+CategoryChoice automaticCategoryFor(const string &tag) {
+    const string normalized = normalizeTitle(tag);
+    const vector<string> sportTerms = {u8"гир", u8"гантел", u8"штанг", u8"фитнес"};
+    for (const string &sportTerm : sportTerms) {
+        if (normalized.find(sportTerm) != string::npos) {
+            return {u8"🏋️ Спорттовары", u8"Спорттовары", Category::hobbiesSportsAndTourism,
+                int(SubCategories::HobbiesSportsAndTourism::sportGoods), false};
+        }
+    }
+
+    if (normalized.find(u8"гараж") != string::npos) {
+        return {u8"🏢 Недвижимость", u8"Недвижимость", Category::realEstate,
+            int(SubCategories::RealEstate::GaragesAndParkingLots), false};
+    }
+
+    return {u8"🌐 Все категории", u8"Все категории", nullopt, nullopt, false};
+}
+
+string categoryName(const QuerySubscription &subscription) {
+    if (subscription.query.subCategory.has_value() &&
+        subscription.query.subCategory.value() == int(SubCategories::HobbiesSportsAndTourism::sportGoods)) {
+        return u8"Спорттовары";
+    }
+    if (subscription.query.subCategory.has_value() &&
+        subscription.query.subCategory.value() == int(SubCategories::RealEstate::GaragesAndParkingLots)) {
+        return u8"Гаражи и стоянки";
+    }
+    if (!subscription.query.category.has_value()) {
+        return u8"Все категории";
+    }
+
+    switch (subscription.query.category.value()) {
+        case Category::realEstate: return u8"Недвижимость";
+        case Category::carsAndTransport: return u8"Авто";
+        case Category::householdAppliances: return u8"Бытовая техника";
+        case Category::computerEquipment: return u8"Компьютеры";
+        case Category::phonesAndTablets: return u8"Телефоны и планшеты";
+        case Category::electronics: return u8"Электроника";
+        case Category::everythingForHome: return u8"Всё для дома";
+        case Category::repairAndBuilding: return u8"Ремонт и стройка";
+        case Category::garden: return u8"Сад";
+        case Category::hobbiesSportsAndTourism: return u8"Хобби и спорт";
+        case Category::readyBusinessAndEquipment: return u8"Оборудование";
+        default: return u8"Другая категория";
+    }
+}
+
+vector<QuerySubscription> subscriptionsForChat(
+    const ProgramConfiguration &programConfiguration,
+    const int64_t chatID
+) {
+    vector<QuerySubscription> result;
+    for (const QuerySubscription &subscription : programConfiguration.subscriptions) {
+        if (subscription.chatID == chatID) {
+            result.push_back(subscription);
+        }
+    }
+    return result;
+}
+
+string formatQueryList(const vector<QuerySubscription> &subscriptions) {
+    if (subscriptions.empty()) {
+        return u8"У вас пока нет запросов.";
+    }
+
+    ostringstream text;
+    text << u8"📋 Ваши запросы: " << subscriptions.size() << "\n\n";
+    for (size_t index = 0; index < subscriptions.size(); ++index) {
+        text << index + 1 << ". "
+             << subscriptions[index].query.tag.value_or(u8"Без названия")
+             << u8"\n   Категория: " << categoryName(subscriptions[index]) << "\n";
+    }
+    return text.str();
+}
+
+string deleteButtonText(const size_t index, const QuerySubscription &subscription) {
+    return u8"🗑 " + to_string(index + 1) + ". " +
+           subscription.query.tag.value_or(u8"Без названия");
+}
+
+vector<vector<string>> mainMenuKeyboard() {
+    return {
+        {u8"📋 Мои запросы"},
+        {u8"➕ Добавить запрос", u8"➖ Удалить запрос"},
+        {u8"ℹ️ Статус"}
+    };
+}
+
+vector<vector<string>> categoryKeyboard() {
+    vector<vector<string>> keyboard;
+    const vector<CategoryChoice> &choices = categoryChoices();
+    for (size_t index = 0; index < choices.size(); index += 2) {
+        vector<string> row = {choices[index].button};
+        if (index + 1 < choices.size()) {
+            row.push_back(choices[index + 1].button);
+        }
+        keyboard.push_back(row);
+    }
+    keyboard.push_back({u8"↩️ Отмена"});
+    return keyboard;
+}
+
+vector<vector<string>> deleteKeyboard(const vector<QuerySubscription> &subscriptions) {
+    vector<vector<string>> keyboard;
+    for (size_t index = 0; index < subscriptions.size(); index += 2) {
+        vector<string> row = {deleteButtonText(index, subscriptions[index])};
+        if (index + 1 < subscriptions.size()) {
+            row.push_back(deleteButtonText(index + 1, subscriptions[index + 1]));
+        }
+        keyboard.push_back(row);
+    }
+    keyboard.push_back({u8"↩️ Отмена"});
+    return keyboard;
+}
+
+void applyQueryOverrides(ProgramConfiguration &programConfiguration, const json &queryOverrides) {
+    if (!queryOverrides.is_object()) {
+        return;
+    }
+
+    for (auto item = queryOverrides.begin(); item != queryOverrides.end(); ++item) {
+        const int64_t chatID = stoll(item.key());
+        programConfiguration.subscriptions.erase(
+            remove_if(
+                programConfiguration.subscriptions.begin(),
+                programConfiguration.subscriptions.end(),
+                [&](const QuerySubscription &subscription) { return subscription.chatID == chatID; }
+            ),
+            programConfiguration.subscriptions.end()
+        );
+
+        if (!item.value().is_array()) {
+            continue;
+        }
+        for (const json &query : item.value()) {
+            programConfiguration.subscriptions.push_back(makeSubscription(chatID, query));
+        }
+    }
+}
+
+void updateQueryOverride(
+    json &queryOverrides,
+    const ProgramConfiguration &programConfiguration,
+    const int64_t chatID
+) {
+    json queries = json::array();
+    for (const QuerySubscription &subscription : programConfiguration.subscriptions) {
+        if (subscription.chatID == chatID) {
+            queries.push_back(subscription.sourceQuery);
+        }
+    }
+    queryOverrides[to_string(chatID)] = queries;
+}
+
 void loadJSONConfigurationData(const json &data, ProgramConfiguration &programConfiguration) {
     {
         json telegramData = data.at("telegram");
@@ -239,25 +459,7 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
         
         const auto addSubscriptions = [&](const int64_t chatID, const json &recipientQueries) {
             for (const json &query : recipientQueries) {
-                const string cacheKey = query.value(
-                    "cache-key",
-                    query.value("tag", "")
-                );
-                const vector<vector<string>> excludedTitleGroups = query.value(
-                    "exclude-title-groups",
-                    vector<vector<string>>{}
-                );
-                const vector<string> requiredTitlePhrases = query.value(
-                    "required-title-phrases",
-                    vector<string>{}
-                );
-                programConfiguration.subscriptions.push_back({
-                    chatID,
-                    parseKufarConfiguration(query),
-                    cacheKey,
-                    excludedTitleGroups,
-                    requiredTitlePhrases
-                });
+                programConfiguration.subscriptions.push_back(makeSubscription(chatID, query));
             }
         };
 
@@ -405,6 +607,17 @@ int main(int argc, char **argv) {
     programConfiguration.files = getFiles(argc, argv);
     loadJSONConfigurationData(programConfiguration.files.configuration.contents, programConfiguration);
 
+    set<int64_t> authorizedChatIDs;
+    for (const QuerySubscription &subscription : programConfiguration.subscriptions) {
+        authorizedChatIDs.insert(subscription.chatID);
+    }
+
+    json queryOverrides = json::object();
+    if (programConfiguration.files.cache.contents.is_object()) {
+        queryOverrides = programConfiguration.files.cache.contents.value("query-overrides", json::object());
+    }
+    applyQueryOverrides(programConfiguration, queryOverrides);
+
     if (programConfiguration.telegramConfiguration.botToken.empty() ||
         programConfiguration.telegramConfiguration.botToken == "1111111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
         cerr << "[ERROR]: Set TELEGRAM_BOT_TOKEN before starting the bot." << endl;
@@ -427,6 +640,12 @@ int main(int argc, char **argv) {
     }
 
     printJSONConfigurationData(programConfiguration);
+
+    try {
+        setBotCommands(programConfiguration.telegramConfiguration.botToken);
+    } catch (const exception &exc) {
+        cerr << "[ERROR (Telegram commands)]: " << exc.what() << endl;
+    }
 
     vector<int> legacyViewedAds;
     vector<string> legacyInitializedQueries;
@@ -473,19 +692,19 @@ int main(int argc, char **argv) {
         }
         json cacheData = {
             {"recipients", recipientsCache},
-            {"telegram-update-offset", telegramUpdateOffset}
+            {"telegram-update-offset", telegramUpdateOffset},
+            {"query-overrides", queryOverrides}
         };
         saveFile(programConfiguration.files.cache.path, cacheData.dump());
     };
 
-    map<int64_t, size_t> queryCounts;
     map<int64_t, time_t> lastSuccessfulCheckByChat;
-    for (const auto &subscription : programConfiguration.subscriptions) {
-        queryCounts[subscription.chatID] += 1;
-        recipientCaches[subscription.chatID];
+    map<int64_t, MenuState> menuStates;
+    for (const int64_t chatID : authorizedChatIDs) {
+        recipientCaches[chatID];
     }
 
-    const auto pollStatusCommands = [&]() {
+    const auto pollBotCommands = [&]() {
         try {
             const vector<TelegramUpdate> updates = getUpdates(
                 programConfiguration.telegramConfiguration.botToken,
@@ -499,31 +718,268 @@ int main(int argc, char **argv) {
                     offsetChanged = true;
                 }
 
-                const auto queryCount = queryCounts.find(update.chatID);
-                if (!isStatusCommand(update.text) || queryCount == queryCounts.end()) {
+                if (authorizedChatIDs.find(update.chatID) == authorizedChatIDs.end()) {
                     continue;
                 }
 
                 TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                 telegramConfiguration.chatID = update.chatID;
+                MenuState &menuState = menuStates[update.chatID];
+                const string text = trimText(update.text);
 
-                ostringstream status;
-                status << "✅ Бот работает\n\n"
-                       << "Активных запросов: " << queryCount->second << "\n"
-                       << "Последняя успешная проверка: "
+                const auto sendMainMenu = [&](const string &message) {
+                    sendTextMessageWithKeyboard(telegramConfiguration, message, mainMenuKeyboard());
+                };
+
+                if (isTelegramCommand(text, "/start") ||
+                    isTelegramCommand(text, "/menu") ||
+                    text == u8"🏠 Главное меню" ||
+                    text == u8"↩️ Отмена") {
+                    menuState = MenuState{};
+                    sendMainMenu(
+                        u8"👋 Главное меню\n\n"
+                        u8"Здесь можно посмотреть, добавить или удалить поисковые запросы. "
+                        u8"Просто нажмите нужную кнопку."
+                    );
+                    continue;
+                }
+
+                if (isTelegramCommand(text, "/queries") || text == u8"📋 Мои запросы") {
+                    menuState = MenuState{};
+                    sendTextMessageWithKeyboard(
+                        telegramConfiguration,
+                        formatQueryList(subscriptionsForChat(programConfiguration, update.chatID)),
+                        mainMenuKeyboard()
+                    );
+                    continue;
+                }
+
+                if (isTelegramCommand(text, "/add") || text == u8"➕ Добавить запрос") {
+                    menuState = MenuState{};
+                    menuState.step = MenuStep::waitingForQuery;
+                    sendTextMessageWithKeyboard(
+                        telegramConfiguration,
+                        u8"➕ Напишите, что нужно искать.\n\nНапример: гиря 24 кг",
+                        {{u8"↩️ Отмена"}}
+                    );
+                    continue;
+                }
+
+                if (isTelegramCommand(text, "/delete") || text == u8"➖ Удалить запрос") {
+                    menuState = MenuState{};
+                    const vector<QuerySubscription> subscriptions = subscriptionsForChat(
+                        programConfiguration,
+                        update.chatID
+                    );
+                    if (subscriptions.empty()) {
+                        sendMainMenu(u8"Удалять нечего — список запросов пуст.");
+                    } else {
+                        menuState.step = MenuStep::waitingForDelete;
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"➖ Какой запрос удалить?\n\nНажмите на него:",
+                            deleteKeyboard(subscriptions)
+                        );
+                    }
+                    continue;
+                }
+
+                if (isStatusCommand(text) || text == u8"ℹ️ Статус") {
+                    const size_t queryCount = count_if(
+                        programConfiguration.subscriptions.begin(),
+                        programConfiguration.subscriptions.end(),
+                        [&](const QuerySubscription &subscription) {
+                            return subscription.chatID == update.chatID;
+                        }
+                    );
+
+                    ostringstream status;
+                    status << u8"✅ Бот работает\n\n"
+                       << u8"Активных запросов: " << queryCount << "\n"
+                       << u8"Последняя успешная проверка: "
                        << formatElapsed(lastSuccessfulCheckByChat[update.chatID]) << "\n"
-                       << "Объявлений в кэше: "
+                       << u8"Объявлений в кэше: "
                        << recipientCaches[update.chatID].viewedAds.size();
 
-                sendTextMessage(telegramConfiguration, status.str());
-                cout << "[STATUS]: Replied to chat " << update.chatID << endl;
+                    sendTextMessageWithKeyboard(telegramConfiguration, status.str(), mainMenuKeyboard());
+                    cout << "[STATUS]: Replied to chat " << update.chatID << endl;
+                    continue;
+                }
+
+                if (menuState.step == MenuStep::waitingForQuery) {
+                    if (text.size() < 2 || text.size() > 50) {
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"Введите короткий запрос — до 50 символов.",
+                            {{u8"↩️ Отмена"}}
+                        );
+                        continue;
+                    }
+
+                    menuState.pendingTag = text;
+                    menuState.step = MenuStep::waitingForCategory;
+                    sendTextMessageWithKeyboard(
+                        telegramConfiguration,
+                        u8"📂 Где искать?\n\n"
+                        u8"Можно доверить выбор боту или нажать «Все категории» для широкого поиска.",
+                        categoryKeyboard()
+                    );
+                    continue;
+                }
+
+                if (menuState.step == MenuStep::waitingForCategory) {
+                    optional<CategoryChoice> selectedCategory;
+                    for (const CategoryChoice &choice : categoryChoices()) {
+                        if (text == choice.button) {
+                            selectedCategory = choice.automatic
+                                ? automaticCategoryFor(menuState.pendingTag)
+                                : choice;
+                            break;
+                        }
+                    }
+
+                    if (!selectedCategory.has_value()) {
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"Нажмите одну из кнопок с категорией.",
+                            categoryKeyboard()
+                        );
+                        continue;
+                    }
+
+                    const string normalizedTag = normalizeTitle(menuState.pendingTag);
+                    const bool duplicate = any_of(
+                        programConfiguration.subscriptions.begin(),
+                        programConfiguration.subscriptions.end(),
+                        [&](const QuerySubscription &subscription) {
+                            return subscription.chatID == update.chatID &&
+                                   subscription.query.tag.has_value() &&
+                                   normalizeTitle(subscription.query.tag.value()) == normalizedTag &&
+                                   subscription.query.category == selectedCategory->category &&
+                                   subscription.query.subCategory == selectedCategory->subCategory;
+                        }
+                    );
+
+                    if (duplicate) {
+                        menuState = MenuState{};
+                        sendMainMenu(u8"Такой запрос с этой категорией уже есть.");
+                        continue;
+                    }
+
+                    json newQuery = {
+                        {"tag", menuState.pendingTag},
+                        {"only-title-search", true},
+                        {"limit", 30}
+                    };
+                    if (selectedCategory->category.has_value()) {
+                        newQuery["category"] = int(selectedCategory->category.value());
+                    }
+                    if (selectedCategory->subCategory.has_value()) {
+                        newQuery["sub-category"] = selectedCategory->subCategory.value();
+                    }
+
+                    const string cacheKey = "telegram|" + normalizedTag + "|" +
+                        (selectedCategory->category.has_value()
+                            ? to_string(int(selectedCategory->category.value()))
+                            : "all") + "|" +
+                        (selectedCategory->subCategory.has_value()
+                            ? to_string(selectedCategory->subCategory.value())
+                            : "all");
+                    newQuery["cache-key"] = cacheKey;
+
+                    programConfiguration.subscriptions.push_back(makeSubscription(update.chatID, newQuery));
+                    recipientCaches[update.chatID];
+                    updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
+                    saveCache();
+
+                    const string addedTag = menuState.pendingTag;
+                    const string addedCategory = selectedCategory->name;
+                    menuState = MenuState{};
+                    sendMainMenu(
+                        u8"✅ Запрос добавлен\n\n🔎 " + addedTag +
+                        u8"\n📂 " + addedCategory +
+                        u8"\n\nСтарые объявления будут запомнены без рассылки; придут только новые."
+                    );
+                    cout << "[MENU]: Added query for chat " << update.chatID << endl;
+                    continue;
+                }
+
+                if (menuState.step == MenuStep::waitingForDelete) {
+                    const vector<QuerySubscription> subscriptions = subscriptionsForChat(
+                        programConfiguration,
+                        update.chatID
+                    );
+                    optional<size_t> selectedIndex;
+                    for (size_t index = 0; index < subscriptions.size(); ++index) {
+                        if (text == deleteButtonText(index, subscriptions[index])) {
+                            selectedIndex = index;
+                            break;
+                        }
+                    }
+
+                    if (!selectedIndex.has_value()) {
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"Нажмите на запрос, который нужно удалить.",
+                            deleteKeyboard(subscriptions)
+                        );
+                        continue;
+                    }
+
+                    const QuerySubscription &selected = subscriptions[selectedIndex.value()];
+                    menuState.pendingDeleteQuery = selected.sourceQuery.dump();
+                    menuState.step = MenuStep::waitingForDeleteConfirmation;
+                    sendTextMessageWithKeyboard(
+                        telegramConfiguration,
+                        u8"Точно удалить запрос «" + selected.query.tag.value_or(u8"Без названия") + u8"»?",
+                        {{u8"✅ Да, удалить"}, {u8"↩️ Отмена"}}
+                    );
+                    continue;
+                }
+
+                if (menuState.step == MenuStep::waitingForDeleteConfirmation) {
+                    if (text != u8"✅ Да, удалить") {
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"Нажмите «Да, удалить» или «Отмена».",
+                            {{u8"✅ Да, удалить"}, {u8"↩️ Отмена"}}
+                        );
+                        continue;
+                    }
+
+                    const auto subscription = find_if(
+                        programConfiguration.subscriptions.begin(),
+                        programConfiguration.subscriptions.end(),
+                        [&](const QuerySubscription &candidate) {
+                            return candidate.chatID == update.chatID &&
+                                   candidate.sourceQuery.dump() == menuState.pendingDeleteQuery;
+                        }
+                    );
+
+                    if (subscription == programConfiguration.subscriptions.end()) {
+                        menuState = MenuState{};
+                        sendMainMenu(u8"Этот запрос уже удалён.");
+                        continue;
+                    }
+
+                    const string removedTag = subscription->query.tag.value_or(u8"Без названия");
+                    programConfiguration.subscriptions.erase(subscription);
+                    updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
+                    saveCache();
+                    menuState = MenuState{};
+                    sendMainMenu(u8"✅ Запрос «" + removedTag + u8"» удалён.");
+                    cout << "[MENU]: Removed query for chat " << update.chatID << endl;
+                    continue;
+                }
+
+                sendMainMenu(u8"Не понял сообщение. Выберите действие кнопкой ниже.");
             }
 
             if (offsetChanged) {
                 saveCache();
             }
         } catch (const exception &exc) {
-            cerr << "[ERROR (Telegram status)]: " << exc.what() << endl;
+            cerr << "[ERROR (Telegram menu)]: " << exc.what() << endl;
         }
     };
 
@@ -532,14 +988,17 @@ int main(int argc, char **argv) {
             const int chunk = min(seconds, 5);
             sleep(chunk);
             seconds -= chunk;
-            pollStatusCommands();
+            pollBotCommands();
         }
     };
 
-    pollStatusCommands();
+    pollBotCommands();
 
     while (true) {
-        for (const auto &subscription : programConfiguration.subscriptions) {
+        // Menu actions can add or remove subscriptions while a cycle is running.
+        // Work on a snapshot so Telegram changes take effect safely on the next cycle.
+        const vector<QuerySubscription> cycleSubscriptions = programConfiguration.subscriptions;
+        for (const auto &subscription : cycleSubscriptions) {
             unsigned int sentCount = 0;
             unsigned int filteredDemandCount = 0;
             unsigned int filteredTitleCount = 0;
@@ -651,7 +1110,7 @@ int main(int argc, char **argv) {
                 saveCache();
             }
 
-            pollStatusCommands();
+            pollBotCommands();
             sleepWithStatusPolling(programConfiguration.queryDelaySeconds);
         }
         sleepWithStatusPolling(programConfiguration.loopDelaySeconds);

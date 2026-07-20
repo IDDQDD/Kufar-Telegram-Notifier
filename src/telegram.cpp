@@ -33,6 +33,26 @@ namespace Telegram {
 
             return stream.str() + " BYN";
         }
+
+        void sendTextMessageRequest(
+            const TelegramConfiguration &telegramConfiguration,
+            const string &text,
+            const optional<string> &replyMarkup
+        ) {
+            const string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken +
+                               "/sendMessage";
+            json request = {
+                {"chat_id", telegramConfiguration.chatID},
+                {"text", text},
+                {"disable_web_page_preview", true}
+            };
+
+            if (replyMarkup.has_value()) {
+                request["reply_markup"] = json::parse(replyMarkup.value());
+            }
+
+            postJSONToURL(url, request.dump());
+        }
     }
 
     optional<int64_t> getLatestChatID(const string &botToken) {
@@ -91,11 +111,43 @@ namespace Telegram {
     }
 
     void sendTextMessage(const TelegramConfiguration &telegramConfiguration, const string &text) {
-        const string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken +
-                           "/sendMessage?chat_id=" + to_string(telegramConfiguration.chatID) +
-                           "&text=" + urlEncode(text) +
-                           "&disable_web_page_preview=true";
-        getJSONFromURL(url);
+        sendTextMessageRequest(telegramConfiguration, text, nullopt);
+    }
+
+    void sendTextMessageWithKeyboard(
+        const TelegramConfiguration &telegramConfiguration,
+        const string &text,
+        const vector<vector<string>> &buttons
+    ) {
+        json keyboard = json::array();
+        for (const vector<string> &row : buttons) {
+            json keyboardRow = json::array();
+            for (const string &buttonText : row) {
+                keyboardRow.push_back({{"text", buttonText}});
+            }
+            keyboard.push_back(keyboardRow);
+        }
+
+        const json replyMarkup = {
+            {"keyboard", keyboard},
+            {"resize_keyboard", true},
+            {"one_time_keyboard", false},
+            {"input_field_placeholder", u8"Выберите действие"}
+        };
+        sendTextMessageRequest(telegramConfiguration, text, replyMarkup.dump());
+    }
+
+    void setBotCommands(const string &botToken) {
+        const json commands = json::array({
+            {{"command", "menu"}, {"description", u8"Открыть простое меню"}},
+            {{"command", "queries"}, {"description", u8"Показать мои запросы"}},
+            {{"command", "add"}, {"description", u8"Добавить запрос"}},
+            {{"command", "delete"}, {"description", u8"Удалить запрос"}},
+            {{"command", "status"}, {"description", u8"Проверить работу бота"}}
+        });
+        const string url = "https://api.telegram.org/bot" + botToken + "/setMyCommands";
+        const json request = {{"commands", commands}};
+        postJSONToURL(url, request.dump());
     }
 
     string makeImageGroupJSON(const vector<string> &images, const string &caption) {
