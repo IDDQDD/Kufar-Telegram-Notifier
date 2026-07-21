@@ -16,6 +16,8 @@
 #include <limits.h>
 #include <iostream>
 #include <libgen.h>
+#include <filesystem>
+#include <stdexcept>
 
 using namespace std;
 
@@ -76,11 +78,31 @@ bool stringHasPrefix(const string &originalString, const string &prefix) {
 }
 
 void saveFile(const string &path, const string &contents) {
-    // Перезапись файла [ВКЛ]
-    cout << "[Сохранение идентификаторов отправленных объявлений]" << endl;
-    ofstream ofs(path, ofstream::trunc);
-    ofs << contents;
-    ofs.close();
+    const filesystem::path targetPath(path);
+    const filesystem::path temporaryPath(path + ".tmp");
+
+    ofstream output(temporaryPath, ios::binary | ios::trunc);
+    if (!output.is_open()) {
+        throw runtime_error("Unable to open temporary cache file for writing");
+    }
+
+    output.write(contents.data(), static_cast<streamsize>(contents.size()));
+    output.flush();
+    if (!output.good()) {
+        output.close();
+        filesystem::remove(temporaryPath);
+        throw runtime_error("Unable to write cache file");
+    }
+    output.close();
+
+    error_code renameError;
+    filesystem::rename(temporaryPath, targetPath, renameError);
+    if (renameError) {
+        filesystem::remove(temporaryPath);
+        throw runtime_error("Unable to atomically replace cache file: " + renameError.message());
+    }
+
+    cout << "[Сохранение кеша]: успешно" << endl;
 }
 
 #ifdef __APPLE__

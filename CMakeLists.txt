@@ -23,3 +23,21 @@ add_executable(
 )
 
 target_link_libraries(Kufar-Telegram-Notifier curl)
+target_compile_options(Kufar-Telegram-Notifier PRIVATE -Wall -Wextra -Wpedantic)
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(
+        Kufar-Telegram-Notifier-Tests
+
+        tests/notifier_tests.cpp
+        src/kufar.cpp
+        src/helperfunctions.cpp
+        src/telegram.cpp
+        src/networking.cpp
+    )
+    target_link_libraries(Kufar-Telegram-Notifier-Tests curl)
+    target_compile_options(Kufar-Telegram-Notifier-Tests PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME notifier-tests COMMAND Kufar-Telegram-Notifier-Tests)
+endif()

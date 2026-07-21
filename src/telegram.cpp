@@ -22,6 +22,17 @@ namespace Telegram {
     const short int MAX_IMAGES_IN_GROUP = 10;
 
     namespace {
+        json parseTelegramResponse(const string &responseBody) {
+            const json response = json::parse(responseBody);
+            if (!response.value("ok", false)) {
+                throw runtime_error(
+                    "Telegram API rejected request: " +
+                    response.value("description", string("unknown error"))
+                );
+            }
+            return response;
+        }
+
         string formatPrice(const int price) {
             ostringstream stream;
             stream << price / 100;
@@ -51,15 +62,15 @@ namespace Telegram {
                 request["reply_markup"] = json::parse(replyMarkup.value());
             }
 
-            postJSONToURL(url, request.dump());
+            parseTelegramResponse(postJSONToURL(url, request.dump()));
         }
     }
 
     optional<int64_t> getLatestChatID(const string &botToken) {
         const string url = "https://api.telegram.org/bot" + botToken + "/getUpdates";
-        const json response = json::parse(getJSONFromURL(url));
+        const json response = parseTelegramResponse(getJSONFromURL(url));
 
-        if (!response.value("ok", false) || !response.contains("result")) {
+        if (!response.contains("result")) {
             return nullopt;
         }
 
@@ -78,9 +89,9 @@ namespace Telegram {
     vector<TelegramUpdate> getUpdates(const string &botToken, const int64_t offset) {
         const string url = "https://api.telegram.org/bot" + botToken +
                            "/getUpdates?timeout=0&offset=" + to_string(offset);
-        const json response = json::parse(getJSONFromURL(url));
+        const json response = parseTelegramResponse(getJSONFromURL(url));
 
-        if (!response.value("ok", false) || !response.contains("result")) {
+        if (!response.contains("result")) {
             throw runtime_error("Telegram getUpdates returned an invalid response");
         }
 
@@ -147,7 +158,7 @@ namespace Telegram {
         });
         const string url = "https://api.telegram.org/bot" + botToken + "/setMyCommands";
         const json request = {{"commands", commands}};
-        postJSONToURL(url, request.dump());
+        parseTelegramResponse(postJSONToURL(url, request.dump()));
     }
 
     string makeImageGroupJSON(const vector<string> &images, const string &caption) {
@@ -184,19 +195,18 @@ namespace Telegram {
                 "Номер телефона не скрыт: " + (ad.phoneNumberIsVisible ? "Да" : "Нет") + "\n"
                 "Ссылка: " + ad.link;
         
-        string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken;
-        if (!ad.images.empty()) {
-            url += "/sendMediaGroup?chat_id=" + to_string(telegramConfiguration.chatID) + "&"
-                   "media=" + urlEncode(makeImageGroupJSON(ad.images, text));
-        } else {
-            url += "/sendPhoto?chat_id=" + to_string(telegramConfiguration.chatID) + "&"
-                   "caption=" + urlEncode(text) + "&"
-                   "photo=https://via.placeholder.com/1080";
-            /*url += "/sendMessage?chat_id=" + telegramConfiguration.chatID_or_Username + "&"
-                   "text=" + urlEncode("[No Photo]\n\n" + text);*/
+        if (ad.images.empty()) {
+            sendTextMessage(telegramConfiguration, text);
+            return;
         }
-        
-        getJSONFromURL(url);
+
+        const string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken +
+                           "/sendMediaGroup";
+        const json request = {
+            {"chat_id", telegramConfiguration.chatID},
+            {"media", json::parse(makeImageGroupJSON(ad.images, text))}
+        };
+        parseTelegramResponse(postJSONToURL(url, request.dump()));
     }
 
     void sendPriceDrop(

@@ -17,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <ctime>
+#include <chrono>
 #include <codecvt>
 #include <locale>
 
@@ -81,6 +82,14 @@ struct MenuState {
     vector<CategoryChoice> pendingCategories;
     bool automaticCategorySelected = false;
     bool privateSellersOnly = false;
+};
+
+struct QueryDisplayGroup {
+    string normalizedTag;
+    string tag;
+    vector<string> categories;
+    size_t searchCount = 0;
+    size_t privateSellerSearchCount = 0;
 };
 
 struct RecipientCache {
@@ -192,6 +201,10 @@ bool matchesRequiredTitlePhrase(const string &title, const vector<string> &requi
 
 bool isStatusCommand(const string &text) {
     return text == "/status" || text.rfind("/status@", 0) == 0;
+}
+
+int remainingCycleDelay(const int cycleIntervalSeconds, const int elapsedSeconds) {
+    return max(0, cycleIntervalSeconds - elapsedSeconds);
 }
 
 string formatElapsed(const time_t timestamp) {
@@ -345,41 +358,14 @@ vector<QuerySubscription> subscriptionsForChat(
     return result;
 }
 
+vector<QueryDisplayGroup> groupQueries(const vector<QuerySubscription> &subscriptions);
+
 string formatQueryList(const vector<QuerySubscription> &subscriptions) {
     if (subscriptions.empty()) {
         return u8"У вас пока нет запросов.";
     }
 
-    struct QueryDisplayGroup {
-        string tag;
-        vector<string> categories;
-        size_t searchCount = 0;
-        size_t privateSellerSearchCount = 0;
-    };
-
-    vector<QueryDisplayGroup> groups;
-    map<string, size_t> groupIndexes;
-    for (const QuerySubscription &subscription : subscriptions) {
-        const string tag = subscription.query.tag.value_or(u8"Без названия");
-        const string normalizedTag = normalizeTitle(tag);
-        auto groupIndex = groupIndexes.find(normalizedTag);
-        if (groupIndex == groupIndexes.end()) {
-            groupIndexes[normalizedTag] = groups.size();
-            groups.push_back({tag, {}, 0, 0});
-            groupIndex = groupIndexes.find(normalizedTag);
-        }
-
-        QueryDisplayGroup &group = groups[groupIndex->second];
-        const string subscriptionCategory = categoryName(subscription);
-        if (find(group.categories.begin(), group.categories.end(), subscriptionCategory) == group.categories.end()) {
-            group.categories.push_back(subscriptionCategory);
-        }
-        ++group.searchCount;
-        if (subscription.query.sellerType == SellerType::individualPerson) {
-            ++group.privateSellerSearchCount;
-        }
-    }
-
+    const vector<QueryDisplayGroup> groups = groupQueries(subscriptions);
     ostringstream text;
     text << u8"📋 Ваши запросы: " << groups.size();
     if (groups.size() != subscriptions.size()) {
@@ -406,9 +392,58 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
     return text.str();
 }
 
-string deleteButtonText(const size_t index, const QuerySubscription &subscription) {
-    return u8"🗑 " + to_string(index + 1) + ". " +
-           subscription.query.tag.value_or(u8"Без названия");
+vector<QueryDisplayGroup> groupQueries(const vector<QuerySubscription> &subscriptions) {
+    vector<QueryDisplayGroup> groups;
+    map<string, size_t> groupIndexes;
+    for (const QuerySubscription &subscription : subscriptions) {
+        const string tag = subscription.query.tag.value_or(u8"Без названия");
+        const string normalizedTag = normalizeTitle(tag);
+        auto groupIndex = groupIndexes.find(normalizedTag);
+        if (groupIndex == groupIndexes.end()) {
+            groupIndexes[normalizedTag] = groups.size();
+            groups.push_back({normalizedTag, tag, {}, 0, 0});
+            groupIndex = groupIndexes.find(normalizedTag);
+        }
+
+        QueryDisplayGroup &group = groups[groupIndex->second];
+        const string subscriptionCategory = categoryName(subscription);
+        if (find(group.categories.begin(), group.categories.end(), subscriptionCategory) == group.categories.end()) {
+            group.categories.push_back(subscriptionCategory);
+        }
+        ++group.searchCount;
+        if (subscription.query.sellerType == SellerType::individualPerson) {
+            ++group.privateSellerSearchCount;
+        }
+    }
+    return groups;
+}
+
+string deleteButtonText(const size_t index, const QueryDisplayGroup &group) {
+    string label = u8"🗑 " + to_string(index + 1) + ". " + group.tag;
+    if (group.searchCount > 1) {
+        label += u8" (" + to_string(group.searchCount) + u8" поиска)";
+    }
+    return label;
+}
+
+size_t removeGroupedQueries(
+    vector<QuerySubscription> &subscriptions,
+    const int64_t chatID,
+    const string &normalizedTag
+) {
+    const size_t previousCount = subscriptions.size();
+    subscriptions.erase(
+        remove_if(
+            subscriptions.begin(),
+            subscriptions.end(),
+            [&](const QuerySubscription &candidate) {
+                return candidate.chatID == chatID &&
+                       normalizeTitle(candidate.query.tag.value_or(u8"Без названия")) == normalizedTag;
+            }
+        ),
+        subscriptions.end()
+    );
+    return previousCount - subscriptions.size();
 }
 
 vector<vector<string>> mainMenuKeyboard() {
@@ -490,12 +525,12 @@ vector<vector<string>> categoryKeyboard(const MenuState &menuState) {
     return keyboard;
 }
 
-vector<vector<string>> deleteKeyboard(const vector<QuerySubscription> &subscriptions) {
+vector<vector<string>> deleteKeyboard(const vector<QueryDisplayGroup> &groups) {
     vector<vector<string>> keyboard;
-    for (size_t index = 0; index < subscriptions.size(); index += 2) {
-        vector<string> row = {deleteButtonText(index, subscriptions[index])};
-        if (index + 1 < subscriptions.size()) {
-            row.push_back(deleteButtonText(index + 1, subscriptions[index + 1]));
+    for (size_t index = 0; index < groups.size(); index += 2) {
+        vector<string> row = {deleteButtonText(index, groups[index])};
+        if (index + 1 < groups.size()) {
+            row.push_back(deleteButtonText(index + 1, groups[index + 1]));
         }
         keyboard.push_back(row);
     }
@@ -604,7 +639,7 @@ void printJSONConfigurationData(const ProgramConfiguration &programConfiguration
     cout << "[CONFIG]: Recipients=" << queryCounts.size()
          << ", queries=" << programConfiguration.subscriptions.size()
          << ", query-delay=" << programConfiguration.queryDelaySeconds << "s"
-         << ", loop-delay=" << programConfiguration.loopDelaySeconds << "s" << endl;
+         << ", cycle-interval=" << programConfiguration.loopDelaySeconds << "s" << endl;
 
     for (const auto &[chatID, count] : queryCounts) {
         cout << "[CONFIG]: Chat " << chatID << ", queries=" << count << endl;
@@ -877,14 +912,16 @@ int main(int argc, char **argv) {
                         programConfiguration,
                         update.chatID
                     );
-                    if (subscriptions.empty()) {
+                    const vector<QueryDisplayGroup> groups = groupQueries(subscriptions);
+                    if (groups.empty()) {
                         sendMainMenu(u8"Удалять нечего — список запросов пуст.");
                     } else {
                         menuState.step = MenuStep::waitingForDelete;
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
-                            u8"➖ Какой запрос удалить?\n\nНажмите на него:",
-                            deleteKeyboard(subscriptions)
+                            u8"➖ Какой запрос удалить?\n\n"
+                            u8"Будут удалены все его категории. Нажмите на запрос:",
+                            deleteKeyboard(groups)
                         );
                     }
                     continue;
@@ -1120,9 +1157,10 @@ int main(int argc, char **argv) {
                         programConfiguration,
                         update.chatID
                     );
+                    const vector<QueryDisplayGroup> groups = groupQueries(subscriptions);
                     optional<size_t> selectedIndex;
-                    for (size_t index = 0; index < subscriptions.size(); ++index) {
-                        if (text == deleteButtonText(index, subscriptions[index])) {
+                    for (size_t index = 0; index < groups.size(); ++index) {
+                        if (text == deleteButtonText(index, groups[index])) {
                             selectedIndex = index;
                             break;
                         }
@@ -1132,17 +1170,18 @@ int main(int argc, char **argv) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
                             u8"Нажмите на запрос, который нужно удалить.",
-                            deleteKeyboard(subscriptions)
+                            deleteKeyboard(groups)
                         );
                         continue;
                     }
 
-                    const QuerySubscription &selected = subscriptions[selectedIndex.value()];
-                    menuState.pendingDeleteQuery = selected.sourceQuery.dump();
+                    const QueryDisplayGroup &selected = groups[selectedIndex.value()];
+                    menuState.pendingDeleteQuery = selected.normalizedTag;
                     menuState.step = MenuStep::waitingForDeleteConfirmation;
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
-                        u8"Точно удалить запрос «" + selected.query.tag.value_or(u8"Без названия") + u8"»?",
+                        u8"Точно удалить запрос «" + selected.tag + u8"» во всех категориях?\n\n"
+                        u8"Будет удалено поисков: " + to_string(selected.searchCount),
                         {{u8"✅ Да, удалить"}, {u8"↩️ Отмена"}}
                     );
                     continue;
@@ -1158,28 +1197,37 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
-                    const auto subscription = find_if(
+                    const auto firstSubscription = find_if(
                         programConfiguration.subscriptions.begin(),
                         programConfiguration.subscriptions.end(),
                         [&](const QuerySubscription &candidate) {
                             return candidate.chatID == update.chatID &&
-                                   candidate.sourceQuery.dump() == menuState.pendingDeleteQuery;
+                                   normalizeTitle(candidate.query.tag.value_or(u8"Без названия")) ==
+                                       menuState.pendingDeleteQuery;
                         }
                     );
 
-                    if (subscription == programConfiguration.subscriptions.end()) {
+                    if (firstSubscription == programConfiguration.subscriptions.end()) {
                         menuState = MenuState{};
                         sendMainMenu(u8"Этот запрос уже удалён.");
                         continue;
                     }
 
-                    const string removedTag = subscription->query.tag.value_or(u8"Без названия");
-                    programConfiguration.subscriptions.erase(subscription);
+                    const string removedTag = firstSubscription->query.tag.value_or(u8"Без названия");
+                    const size_t removedCount = removeGroupedQueries(
+                        programConfiguration.subscriptions,
+                        update.chatID,
+                        menuState.pendingDeleteQuery
+                    );
                     updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
                     saveCache();
                     menuState = MenuState{};
-                    sendMainMenu(u8"✅ Запрос «" + removedTag + u8"» удалён.");
-                    cout << "[MENU]: Removed query for chat " << update.chatID << endl;
+                    sendMainMenu(
+                        u8"✅ Запрос «" + removedTag + u8"» удалён во всех категориях.\n"
+                        u8"Удалено поисков: " + to_string(removedCount)
+                    );
+                    cout << "[MENU]: Removed " << removedCount
+                         << " grouped queries for chat " << update.chatID << endl;
                     continue;
                 }
 
@@ -1206,6 +1254,7 @@ int main(int argc, char **argv) {
     pollBotCommands();
 
     while (true) {
+        const auto cycleStartedAt = chrono::steady_clock::now();
         // Menu actions can add or remove subscriptions while a cycle is running.
         // Work on a snapshot so Telegram changes take effect safely on the next cycle.
         const vector<QuerySubscription> cycleSubscriptions = programConfiguration.subscriptions;
@@ -1249,22 +1298,29 @@ int main(int argc, char **argv) {
 
                     const string advertID = to_string(advert.id);
                     if (!vectorContains(recipientCache.viewedAds, advert.id)) {
-                        recipientCache.viewedAds.push_back(advert.id);
-                        recipientCache.adPrices[advertID] = advert.price;
-                        cacheChanged = true;
+                        bool rememberAdvert = !queryInitialized;
 
                         if (queryInitialized) {
                             cout << "[New]: Adding [Chat ID: " << subscription.chatID << "], [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
-                            sentCount += 1;
 
                             try {
                                 TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                                 telegramConfiguration.chatID = subscription.chatID;
                                 sendAdvert(telegramConfiguration, advert);
+                                rememberAdvert = true;
+                                sentCount += 1;
                                 usleep(300000); // Keep Telegram sends gently rate-limited.
                             } catch (const exception &exc) {
                                 cerr << "[ERROR (sendAdvert)]: " << exc.what() << endl;
                             }
+                        }
+
+                        if (rememberAdvert) {
+                            // Only mark a new advert as viewed after Telegram confirms delivery.
+                            // Initial query priming remains silent and is stored immediately.
+                            recipientCache.viewedAds.push_back(advert.id);
+                            recipientCache.adPrices[advertID] = advert.price;
+                            cacheChanged = true;
                         }
                     } else {
                         const auto previousPrice = recipientCache.adPrices.find(advertID);
@@ -1274,24 +1330,31 @@ int main(int argc, char **argv) {
                             cacheChanged = true;
                         } else if (previousPrice->second != advert.price) {
                             const int oldPrice = previousPrice->second;
-                            previousPrice->second = advert.price;
-                            cacheChanged = true;
+                            bool rememberNewPrice = true;
 
                             if (queryInitialized && advert.price < oldPrice) {
                                 cout << "[PRICE DROP]: Chat " << subscription.chatID
                                      << ", ad=" << advert.id
                                      << ", old=" << oldPrice
                                      << ", new=" << advert.price << endl;
-                                sentCount += 1;
+                                rememberNewPrice = false;
 
                                 try {
                                     TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                                     telegramConfiguration.chatID = subscription.chatID;
                                     sendPriceDrop(telegramConfiguration, advert, oldPrice);
+                                    rememberNewPrice = true;
+                                    sentCount += 1;
                                     usleep(300000);
                                 } catch (const exception &exc) {
                                     cerr << "[ERROR (sendPriceDrop)]: " << exc.what() << endl;
                                 }
+                            }
+
+                            if (rememberNewPrice) {
+                                // A failed price-drop notification is retried on the next cycle.
+                                previousPrice->second = advert.price;
+                                cacheChanged = true;
                             }
                         }
                     }
@@ -1324,7 +1387,17 @@ int main(int argc, char **argv) {
             pollBotCommands();
             sleepWithStatusPolling(programConfiguration.queryDelaySeconds);
         }
-        sleepWithStatusPolling(programConfiguration.loopDelaySeconds);
+
+        const int elapsedSeconds = static_cast<int>(chrono::duration_cast<chrono::seconds>(
+            chrono::steady_clock::now() - cycleStartedAt
+        ).count());
+        const int remainingCycleSeconds = remainingCycleDelay(
+            programConfiguration.loopDelaySeconds,
+            elapsedSeconds
+        );
+        cout << "[CYCLE]: completed in " << elapsedSeconds
+             << "s, next cycle in " << remainingCycleSeconds << "s" << endl;
+        sleepWithStatusPolling(remainingCycleSeconds);
     }
     return 0;
 }
