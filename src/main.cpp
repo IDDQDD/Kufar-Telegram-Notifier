@@ -80,6 +80,7 @@ struct MenuState {
     string pendingDeleteQuery;
     vector<CategoryChoice> pendingCategories;
     bool automaticCategorySelected = false;
+    bool privateSellersOnly = false;
 };
 
 struct RecipientCache {
@@ -349,12 +350,58 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
         return u8"У вас пока нет запросов.";
     }
 
+    struct QueryDisplayGroup {
+        string tag;
+        vector<string> categories;
+        size_t searchCount = 0;
+        size_t privateSellerSearchCount = 0;
+    };
+
+    vector<QueryDisplayGroup> groups;
+    map<string, size_t> groupIndexes;
+    for (const QuerySubscription &subscription : subscriptions) {
+        const string tag = subscription.query.tag.value_or(u8"Без названия");
+        const string normalizedTag = normalizeTitle(tag);
+        auto groupIndex = groupIndexes.find(normalizedTag);
+        if (groupIndex == groupIndexes.end()) {
+            groupIndexes[normalizedTag] = groups.size();
+            groups.push_back({tag, {}, 0, 0});
+            groupIndex = groupIndexes.find(normalizedTag);
+        }
+
+        QueryDisplayGroup &group = groups[groupIndex->second];
+        const string subscriptionCategory = categoryName(subscription);
+        if (find(group.categories.begin(), group.categories.end(), subscriptionCategory) == group.categories.end()) {
+            group.categories.push_back(subscriptionCategory);
+        }
+        ++group.searchCount;
+        if (subscription.query.sellerType == SellerType::individualPerson) {
+            ++group.privateSellerSearchCount;
+        }
+    }
+
     ostringstream text;
-    text << u8"📋 Ваши запросы: " << subscriptions.size() << "\n\n";
-    for (size_t index = 0; index < subscriptions.size(); ++index) {
-        text << index + 1 << ". "
-             << subscriptions[index].query.tag.value_or(u8"Без названия")
-             << u8"\n   Категория: " << categoryName(subscriptions[index]) << "\n";
+    text << u8"📋 Ваши запросы: " << groups.size();
+    if (groups.size() != subscriptions.size()) {
+        text << u8"  •  поисков по категориям: " << subscriptions.size();
+    }
+    text << "\n\n";
+
+    for (size_t index = 0; index < groups.size(); ++index) {
+        const QueryDisplayGroup &group = groups[index];
+        text << index + 1 << u8". 🔎 " << group.tag << u8" — 📂 ";
+        for (size_t categoryIndex = 0; categoryIndex < group.categories.size(); ++categoryIndex) {
+            if (categoryIndex > 0) {
+                text << u8" • ";
+            }
+            text << group.categories[categoryIndex];
+        }
+        if (group.privateSellerSearchCount == group.searchCount) {
+            text << u8" — 👤 только частные";
+        } else if (group.privateSellerSearchCount > 0) {
+            text << u8" — 👥 фильтр продавца различается";
+        }
+        text << "\n";
     }
     return text.str();
 }
@@ -402,6 +449,16 @@ string categoryConfirmButton(const size_t count) {
     return u8"✅ Добавить выбранные (" + to_string(count) + ")";
 }
 
+string sellerFilterButtonText(const MenuState &menuState) {
+    return (menuState.privateSellersOnly ? u8"✅ " : u8"⬜ ") + string(u8"Только частные продавцы");
+}
+
+string sellerFilterText(const MenuState &menuState) {
+    return menuState.privateSellersOnly
+        ? u8"только частные — компании исключены"
+        : u8"все продавцы";
+}
+
 string selectedCategoriesText(const MenuState &menuState) {
     if (menuState.pendingCategories.empty()) {
         return u8"Пока ничего не выбрано.";
@@ -427,6 +484,7 @@ vector<vector<string>> categoryKeyboard(const MenuState &menuState) {
         }
         keyboard.push_back(row);
     }
+    keyboard.push_back({sellerFilterButtonText(menuState)});
     keyboard.push_back({categoryConfirmButton(menuState.pendingCategories.size())});
     keyboard.push_back({u8"↩️ Отмена"});
     return keyboard;
@@ -871,13 +929,26 @@ int main(int argc, char **argv) {
                         u8"📂 Где искать?\n\n"
                         u8"Выберите одну или несколько категорий. Повторное нажатие снимает галочку.\n"
                         u8"«Все категории» включает широкий поиск и выбирается отдельно.\n\n"
-                        u8"Выбрано: " + selectedCategoriesText(menuState),
+                        u8"Выбрано: " + selectedCategoriesText(menuState) +
+                        u8"\nПродавцы: " + sellerFilterText(menuState),
                         categoryKeyboard(menuState)
                     );
                     continue;
                 }
 
                 if (menuState.step == MenuStep::waitingForCategory) {
+                    if (text == sellerFilterButtonText(menuState)) {
+                        menuState.privateSellersOnly = !menuState.privateSellersOnly;
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"👤 Фильтр продавцов изменён.\n\n"
+                            u8"Выбрано: " + selectedCategoriesText(menuState) +
+                            u8"\nПродавцы: " + sellerFilterText(menuState),
+                            categoryKeyboard(menuState)
+                        );
+                        continue;
+                    }
+
                     bool categoryButtonPressed = false;
                     for (const CategoryChoice &choice : categoryChoices()) {
                         if (text != categoryButtonText(menuState, choice)) {
@@ -928,7 +999,8 @@ int main(int argc, char **argv) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
                             u8"📂 Выберите ещё категории или нажмите «Добавить выбранные».\n\n"
-                            u8"Выбрано: " + selectedCategoriesText(menuState),
+                            u8"Выбрано: " + selectedCategoriesText(menuState) +
+                            u8"\nПродавцы: " + sellerFilterText(menuState),
                             categoryKeyboard(menuState)
                         );
                         continue;
@@ -938,7 +1010,8 @@ int main(int argc, char **argv) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
                             u8"Выберите категории галочками, затем нажмите «Добавить выбранные».\n\n"
-                            u8"Выбрано: " + selectedCategoriesText(menuState),
+                            u8"Выбрано: " + selectedCategoriesText(menuState) +
+                            u8"\nПродавцы: " + sellerFilterText(menuState),
                             categoryKeyboard(menuState)
                         );
                         continue;
@@ -955,6 +1028,10 @@ int main(int argc, char **argv) {
 
                     const string normalizedTag = normalizeTitle(menuState.pendingTag);
                     const string addedTag = menuState.pendingTag;
+                    const bool addedPrivateSellersOnly = menuState.privateSellersOnly;
+                    const optional<SellerType> selectedSellerType = addedPrivateSellersOnly
+                        ? optional<SellerType>(SellerType::individualPerson)
+                        : nullopt;
                     vector<string> addedCategories;
                     size_t duplicateCount = 0;
 
@@ -967,7 +1044,8 @@ int main(int argc, char **argv) {
                                        subscription.query.tag.has_value() &&
                                        normalizeTitle(subscription.query.tag.value()) == normalizedTag &&
                                        subscription.query.category == selectedCategory.category &&
-                                       subscription.query.subCategory == selectedCategory.subCategory;
+                                       subscription.query.subCategory == selectedCategory.subCategory &&
+                                       subscription.query.sellerType == selectedSellerType;
                             }
                         );
 
@@ -987,6 +1065,9 @@ int main(int argc, char **argv) {
                         if (selectedCategory.subCategory.has_value()) {
                             newQuery["sub-category"] = selectedCategory.subCategory.value();
                         }
+                        if (addedPrivateSellersOnly) {
+                            newQuery["seller-type"] = int(SellerType::individualPerson);
+                        }
 
                         const string cacheKey = "telegram|" + normalizedTag + "|" +
                             (selectedCategory.category.has_value()
@@ -994,7 +1075,8 @@ int main(int argc, char **argv) {
                                 : "all") + "|" +
                             (selectedCategory.subCategory.has_value()
                                 ? to_string(selectedCategory.subCategory.value())
-                                : "all");
+                                : "all") + "|" +
+                            (addedPrivateSellersOnly ? "private" : "all-sellers");
                         newQuery["cache-key"] = cacheKey;
 
                         programConfiguration.subscriptions.push_back(makeSubscription(update.chatID, newQuery));
@@ -1019,6 +1101,8 @@ int main(int argc, char **argv) {
                     for (const string &category : addedCategories) {
                         resultMessage << u8"• " << category << "\n";
                     }
+                    resultMessage << u8"👤 Продавцы: "
+                                  << (addedPrivateSellersOnly ? u8"только частные" : u8"все") << "\n";
                     if (duplicateCount > 0) {
                         resultMessage << u8"\nУже существующих сочетаний пропущено: " << duplicateCount << "\n";
                     }
