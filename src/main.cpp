@@ -66,18 +66,20 @@ enum class MenuStep {
     waitingForDeleteConfirmation
 };
 
-struct MenuState {
-    MenuStep step = MenuStep::idle;
-    string pendingTag;
-    string pendingDeleteQuery;
-};
-
 struct CategoryChoice {
     string button;
     string name;
     optional<Category> category;
     optional<int> subCategory;
     bool automatic = false;
+};
+
+struct MenuState {
+    MenuStep step = MenuStep::idle;
+    string pendingTag;
+    string pendingDeleteQuery;
+    vector<CategoryChoice> pendingCategories;
+    bool automaticCategorySelected = false;
 };
 
 struct RecipientCache {
@@ -293,7 +295,7 @@ CategoryChoice automaticCategoryFor(const string &tag) {
     }
 
     if (normalized.find(u8"гараж") != string::npos) {
-        return {u8"🏢 Недвижимость", u8"Недвижимость", Category::realEstate,
+        return {u8"🏢 Недвижимость", u8"Гаражи и стоянки", Category::realEstate,
             int(SubCategories::RealEstate::GaragesAndParkingLots), false};
     }
 
@@ -370,16 +372,62 @@ vector<vector<string>> mainMenuKeyboard() {
     };
 }
 
-vector<vector<string>> categoryKeyboard() {
+bool sameCategory(const CategoryChoice &left, const CategoryChoice &right) {
+    return left.category == right.category && left.subCategory == right.subCategory;
+}
+
+bool isAllCategories(const CategoryChoice &choice) {
+    return !choice.automatic && !choice.category.has_value() && !choice.subCategory.has_value();
+}
+
+bool isSelectedCategory(const MenuState &menuState, const CategoryChoice &choice) {
+    return any_of(
+        menuState.pendingCategories.begin(),
+        menuState.pendingCategories.end(),
+        [&](const CategoryChoice &selected) { return sameCategory(selected, choice); }
+    );
+}
+
+string categoryButtonText(const MenuState &menuState, const CategoryChoice &choice) {
+    if (choice.automatic) {
+        if (menuState.automaticCategorySelected && !menuState.pendingCategories.empty()) {
+            return u8"✅ Авто: " + menuState.pendingCategories.front().name;
+        }
+        return choice.button;
+    }
+    return (isSelectedCategory(menuState, choice) ? u8"✅ " : u8"⬜ ") + choice.name;
+}
+
+string categoryConfirmButton(const size_t count) {
+    return u8"✅ Добавить выбранные (" + to_string(count) + ")";
+}
+
+string selectedCategoriesText(const MenuState &menuState) {
+    if (menuState.pendingCategories.empty()) {
+        return u8"Пока ничего не выбрано.";
+    }
+
+    ostringstream text;
+    for (size_t index = 0; index < menuState.pendingCategories.size(); ++index) {
+        if (index > 0) {
+            text << ", ";
+        }
+        text << menuState.pendingCategories[index].name;
+    }
+    return text.str();
+}
+
+vector<vector<string>> categoryKeyboard(const MenuState &menuState) {
     vector<vector<string>> keyboard;
     const vector<CategoryChoice> &choices = categoryChoices();
     for (size_t index = 0; index < choices.size(); index += 2) {
-        vector<string> row = {choices[index].button};
+        vector<string> row = {categoryButtonText(menuState, choices[index])};
         if (index + 1 < choices.size()) {
-            row.push_back(choices[index + 1].button);
+            row.push_back(categoryButtonText(menuState, choices[index + 1]));
         }
         keyboard.push_back(row);
     }
+    keyboard.push_back({categoryConfirmButton(menuState.pendingCategories.size())});
     keyboard.push_back({u8"↩️ Отмена"});
     return keyboard;
 }
@@ -821,86 +869,165 @@ int main(int argc, char **argv) {
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
                         u8"📂 Где искать?\n\n"
-                        u8"Можно доверить выбор боту или нажать «Все категории» для широкого поиска.",
-                        categoryKeyboard()
+                        u8"Выберите одну или несколько категорий. Повторное нажатие снимает галочку.\n"
+                        u8"«Все категории» включает широкий поиск и выбирается отдельно.\n\n"
+                        u8"Выбрано: " + selectedCategoriesText(menuState),
+                        categoryKeyboard(menuState)
                     );
                     continue;
                 }
 
                 if (menuState.step == MenuStep::waitingForCategory) {
-                    optional<CategoryChoice> selectedCategory;
+                    bool categoryButtonPressed = false;
                     for (const CategoryChoice &choice : categoryChoices()) {
-                        if (text == choice.button) {
-                            selectedCategory = choice.automatic
-                                ? automaticCategoryFor(menuState.pendingTag)
-                                : choice;
+                        if (text != categoryButtonText(menuState, choice)) {
+                            continue;
+                        }
+
+                        categoryButtonPressed = true;
+                        if (choice.automatic) {
+                            if (menuState.automaticCategorySelected) {
+                                menuState.pendingCategories.clear();
+                                menuState.automaticCategorySelected = false;
+                            } else {
+                                menuState.pendingCategories = {automaticCategoryFor(menuState.pendingTag)};
+                                menuState.automaticCategorySelected = true;
+                            }
                             break;
                         }
+
+                        if (menuState.automaticCategorySelected) {
+                            menuState.pendingCategories.clear();
+                            menuState.automaticCategorySelected = false;
+                        }
+
+                        const auto selected = find_if(
+                            menuState.pendingCategories.begin(),
+                            menuState.pendingCategories.end(),
+                            [&](const CategoryChoice &candidate) { return sameCategory(candidate, choice); }
+                        );
+                        if (selected != menuState.pendingCategories.end()) {
+                            menuState.pendingCategories.erase(selected);
+                        } else if (isAllCategories(choice)) {
+                            menuState.pendingCategories = {choice};
+                        } else {
+                            menuState.pendingCategories.erase(
+                                remove_if(
+                                    menuState.pendingCategories.begin(),
+                                    menuState.pendingCategories.end(),
+                                    [](const CategoryChoice &candidate) { return isAllCategories(candidate); }
+                                ),
+                                menuState.pendingCategories.end()
+                            );
+                            menuState.pendingCategories.push_back(choice);
+                        }
+                        break;
                     }
 
-                    if (!selectedCategory.has_value()) {
+                    if (categoryButtonPressed) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
-                            u8"Нажмите одну из кнопок с категорией.",
-                            categoryKeyboard()
+                            u8"📂 Выберите ещё категории или нажмите «Добавить выбранные».\n\n"
+                            u8"Выбрано: " + selectedCategoriesText(menuState),
+                            categoryKeyboard(menuState)
+                        );
+                        continue;
+                    }
+
+                    if (text != categoryConfirmButton(menuState.pendingCategories.size())) {
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"Выберите категории галочками, затем нажмите «Добавить выбранные».\n\n"
+                            u8"Выбрано: " + selectedCategoriesText(menuState),
+                            categoryKeyboard(menuState)
+                        );
+                        continue;
+                    }
+
+                    if (menuState.pendingCategories.empty()) {
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            u8"Сначала выберите хотя бы одну категорию.",
+                            categoryKeyboard(menuState)
                         );
                         continue;
                     }
 
                     const string normalizedTag = normalizeTitle(menuState.pendingTag);
-                    const bool duplicate = any_of(
-                        programConfiguration.subscriptions.begin(),
-                        programConfiguration.subscriptions.end(),
-                        [&](const QuerySubscription &subscription) {
-                            return subscription.chatID == update.chatID &&
-                                   subscription.query.tag.has_value() &&
-                                   normalizeTitle(subscription.query.tag.value()) == normalizedTag &&
-                                   subscription.query.category == selectedCategory->category &&
-                                   subscription.query.subCategory == selectedCategory->subCategory;
-                        }
-                    );
+                    const string addedTag = menuState.pendingTag;
+                    vector<string> addedCategories;
+                    size_t duplicateCount = 0;
 
-                    if (duplicate) {
-                        menuState = MenuState{};
-                        sendMainMenu(u8"Такой запрос с этой категорией уже есть.");
+                    for (const CategoryChoice &selectedCategory : menuState.pendingCategories) {
+                        const bool duplicate = any_of(
+                            programConfiguration.subscriptions.begin(),
+                            programConfiguration.subscriptions.end(),
+                            [&](const QuerySubscription &subscription) {
+                                return subscription.chatID == update.chatID &&
+                                       subscription.query.tag.has_value() &&
+                                       normalizeTitle(subscription.query.tag.value()) == normalizedTag &&
+                                       subscription.query.category == selectedCategory.category &&
+                                       subscription.query.subCategory == selectedCategory.subCategory;
+                            }
+                        );
+
+                        if (duplicate) {
+                            ++duplicateCount;
+                            continue;
+                        }
+
+                        json newQuery = {
+                            {"tag", menuState.pendingTag},
+                            {"only-title-search", true},
+                            {"limit", 30}
+                        };
+                        if (selectedCategory.category.has_value()) {
+                            newQuery["category"] = int(selectedCategory.category.value());
+                        }
+                        if (selectedCategory.subCategory.has_value()) {
+                            newQuery["sub-category"] = selectedCategory.subCategory.value();
+                        }
+
+                        const string cacheKey = "telegram|" + normalizedTag + "|" +
+                            (selectedCategory.category.has_value()
+                                ? to_string(int(selectedCategory.category.value()))
+                                : "all") + "|" +
+                            (selectedCategory.subCategory.has_value()
+                                ? to_string(selectedCategory.subCategory.value())
+                                : "all");
+                        newQuery["cache-key"] = cacheKey;
+
+                        programConfiguration.subscriptions.push_back(makeSubscription(update.chatID, newQuery));
+                        addedCategories.push_back(selectedCategory.name);
+                    }
+
+                    if (!addedCategories.empty()) {
+                        recipientCaches[update.chatID];
+                        updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
+                        saveCache();
+                    }
+
+                    menuState = MenuState{};
+                    if (addedCategories.empty()) {
+                        sendMainMenu(u8"Все выбранные сочетания запроса и категорий уже существуют.");
                         continue;
                     }
 
-                    json newQuery = {
-                        {"tag", menuState.pendingTag},
-                        {"only-title-search", true},
-                        {"limit", 30}
-                    };
-                    if (selectedCategory->category.has_value()) {
-                        newQuery["category"] = int(selectedCategory->category.value());
+                    ostringstream resultMessage;
+                    resultMessage << u8"✅ Запрос добавлен\n\n🔎 " << addedTag
+                                  << u8"\n📂 Категорий: " << addedCategories.size() << "\n";
+                    for (const string &category : addedCategories) {
+                        resultMessage << u8"• " << category << "\n";
                     }
-                    if (selectedCategory->subCategory.has_value()) {
-                        newQuery["sub-category"] = selectedCategory->subCategory.value();
+                    if (duplicateCount > 0) {
+                        resultMessage << u8"\nУже существующих сочетаний пропущено: " << duplicateCount << "\n";
                     }
-
-                    const string cacheKey = "telegram|" + normalizedTag + "|" +
-                        (selectedCategory->category.has_value()
-                            ? to_string(int(selectedCategory->category.value()))
-                            : "all") + "|" +
-                        (selectedCategory->subCategory.has_value()
-                            ? to_string(selectedCategory->subCategory.value())
-                            : "all");
-                    newQuery["cache-key"] = cacheKey;
-
-                    programConfiguration.subscriptions.push_back(makeSubscription(update.chatID, newQuery));
-                    recipientCaches[update.chatID];
-                    updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
-                    saveCache();
-
-                    const string addedTag = menuState.pendingTag;
-                    const string addedCategory = selectedCategory->name;
-                    menuState = MenuState{};
+                    resultMessage << u8"\nСтарые объявления будут запомнены без рассылки; придут только новые.";
                     sendMainMenu(
-                        u8"✅ Запрос добавлен\n\n🔎 " + addedTag +
-                        u8"\n📂 " + addedCategory +
-                        u8"\n\nСтарые объявления будут запомнены без рассылки; придут только новые."
+                        resultMessage.str()
                     );
-                    cout << "[MENU]: Added query for chat " << update.chatID << endl;
+                    cout << "[MENU]: Added " << addedCategories.size()
+                         << " query categories for chat " << update.chatID << endl;
                     continue;
                 }
 
