@@ -87,7 +87,8 @@ namespace Telegram {
                  << u8"🗓 " << formatDate(ad.date) << "\n"
                  << (ad.phoneNumberIsVisible ? u8"📞 Телефон открыт" : u8"🔒 Телефон скрыт")
                  << "\n\n"
-                 << "<a href=\"" << escapeHTML(ad.link) << u8"\">Открыть на Kufar →</a>";
+                 << u8"🔗 <a href=\"" << escapeHTML(ad.link) << "\">"
+                 << escapeHTML(ad.link) << "</a>";
             return text.str();
         }
 
@@ -294,7 +295,8 @@ namespace Telegram {
                       u8"💰 <s>" + formatPrice(previousPrice) + "</s> → <b>" +
                       formatPrice(ad.price) + "</b>\n"
                       u8"📉 " + percentageText + u8" · выгода " + formatPrice(difference) + "\n\n"
-                      "<a href=\"" + escapeHTML(ad.link) + u8"\">Открыть на Kufar →</a>";
+                      u8"🔗 <a href=\"" + escapeHTML(ad.link) + "\">" +
+                      escapeHTML(ad.link) + "</a>";
 
         sendTextMessageRequest(telegramConfiguration, text, nullopt, string("HTML"));
     }

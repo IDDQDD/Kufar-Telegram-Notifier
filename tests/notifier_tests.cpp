@@ -158,6 +158,10 @@ namespace {
             advertCard.find(u8"Запрос:") == string::npos,
             "advert card must not include the verbose query label"
         );
+        require(
+            advertCard.find("https://example.test/ad</a>") != string::npos,
+            "advert card must show the full Kufar link"
+        );
 
         advert.price = 0;
         const string negotiableAdvertCard = formatAdvertCard(advert);
