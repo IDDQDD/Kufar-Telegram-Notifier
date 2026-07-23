@@ -89,6 +89,45 @@ namespace {
         require(remainingCycleDelay(300, 180) == 120, "cycle must wait until five minutes");
         require(remainingCycleDelay(300, 320) == 0, "slow cycles must not use a negative delay");
     }
+
+    void testCategoryMenuPages() {
+        const vector<const CategoryChoice *> popular =
+            categoryChoicesForPage(CategoryMenuPage::popular);
+        const vector<const CategoryChoice *> more =
+            categoryChoicesForPage(CategoryMenuPage::more);
+
+        require(!popular.empty(), "popular category page must not be empty");
+        require(!more.empty(), "secondary category page must not be empty");
+        require(popular.size() <= 8, "popular page must stay simple");
+        require(
+            any_of(more.begin(), more.end(), [](const CategoryChoice *choice) {
+                return choice->category == Category::computerEquipment;
+            }),
+            "secondary page must include computers"
+        );
+        require(
+            any_of(more.begin(), more.end(), [](const CategoryChoice *choice) {
+                return choice->category == Category::garden;
+            }),
+            "secondary page must include garden"
+        );
+
+        MenuState menuState;
+        menuState.pendingCategories = {*more.front()};
+        menuState.categoryPage = CategoryMenuPage::popular;
+        require(
+            selectedCategoriesText(menuState).find(more.front()->name) != string::npos,
+            "selected categories must persist while switching pages"
+        );
+    }
+
+    void testPriceDropRules() {
+        require(priceDropPercent(10000, 7500) == 25, "discount percentage must be rounded correctly");
+        require(isNewLowestPrice(7500, 10000), "a real new minimum must trigger");
+        require(!isNewLowestPrice(11000, 10000), "a price rebound must not trigger");
+        require(!isNewLowestPrice(10500, 10000), "a fake discount above the previous minimum must not trigger");
+        require(!isNewLowestPrice(0, 10000), "zero or negotiable price must not trigger");
+    }
 }
 
 int main() {
@@ -96,5 +135,7 @@ int main() {
     testGroupedQueriesAndDeletionKeyboard();
     testAtomicCacheWrite();
     testCycleTiming();
+    testCategoryMenuPages();
+    testPriceDropRules();
     return 0;
 }

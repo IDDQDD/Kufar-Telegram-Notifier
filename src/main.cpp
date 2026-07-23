@@ -67,12 +67,18 @@ enum class MenuStep {
     waitingForDeleteConfirmation
 };
 
+enum class CategoryMenuPage {
+    popular,
+    more
+};
+
 struct CategoryChoice {
     string button;
     string name;
     optional<Category> category;
     optional<int> subCategory;
     bool automatic = false;
+    bool secondary = false;
 };
 
 struct MenuState {
@@ -82,6 +88,7 @@ struct MenuState {
     vector<CategoryChoice> pendingCategories;
     bool automaticCategorySelected = false;
     bool privateSellersOnly = false;
+    CategoryMenuPage categoryPage = CategoryMenuPage::popular;
 };
 
 struct QueryDisplayGroup {
@@ -96,6 +103,7 @@ struct RecipientCache {
     vector<int> viewedAds;
     vector<string> initializedQueries;
     map<string, int> adPrices;
+    map<string, int> adLowestPrices;
 };
 
 struct ProgramConfiguration {
@@ -207,6 +215,19 @@ int remainingCycleDelay(const int cycleIntervalSeconds, const int elapsedSeconds
     return max(0, cycleIntervalSeconds - elapsedSeconds);
 }
 
+int priceDropPercent(const int previousPrice, const int currentPrice) {
+    if (previousPrice <= 0 || currentPrice < 0 || currentPrice >= previousPrice) {
+        return 0;
+    }
+
+    const long long difference = static_cast<long long>(previousPrice) - currentPrice;
+    return static_cast<int>((difference * 100 + previousPrice / 2) / previousPrice);
+}
+
+bool isNewLowestPrice(const int currentPrice, const int lowestPrice) {
+    return currentPrice > 0 && lowestPrice > 0 && currentPrice < lowestPrice;
+}
+
 string formatElapsed(const time_t timestamp) {
     if (timestamp <= 0) {
         return "ещё не завершена";
@@ -289,13 +310,32 @@ const vector<CategoryChoice> &categoryChoices() {
         {u8"🔌 Электроника", u8"Электроника", Category::electronics, nullopt, false},
         {u8"🏠 Бытовая техника", u8"Бытовая техника", Category::householdAppliances, nullopt, false},
         {u8"🛠 Ремонт и стройка", u8"Ремонт и стройка", Category::repairAndBuilding, nullopt, false},
-        {u8"🛋 Всё для дома", u8"Всё для дома", Category::everythingForHome, nullopt, false},
-        {u8"🚗 Авто", u8"Авто", Category::carsAndTransport, nullopt, false},
         {u8"🏢 Недвижимость", u8"Недвижимость", Category::realEstate, nullopt, false},
-        {u8"🎨 Хобби и спорт", u8"Хобби и спорт", Category::hobbiesSportsAndTourism, nullopt, false},
-        {u8"🏭 Оборудование", u8"Оборудование", Category::readyBusinessAndEquipment, nullopt, false}
+        {u8"🏭 Оборудование", u8"Оборудование", Category::readyBusinessAndEquipment, nullopt, false},
+
+        {u8"💻 Компьютеры", u8"Компьютеры", Category::computerEquipment, nullopt, false, true},
+        {u8"📱 Телефоны", u8"Телефоны и планшеты", Category::phonesAndTablets, nullopt, false, true},
+        {u8"🛋 Всё для дома", u8"Всё для дома", Category::everythingForHome, nullopt, false, true},
+        {u8"🪑 Мебель", u8"Мебель", Category::furniture, nullopt, false, true},
+        {u8"🚗 Авто", u8"Авто", Category::carsAndTransport, nullopt, false, true},
+        {u8"🌿 Сад", u8"Сад", Category::garden, nullopt, false, true},
+        {u8"🎨 Хобби и спорт", u8"Хобби и спорт", Category::hobbiesSportsAndTourism, nullopt, false, true},
+        {u8"🧸 Детские товары", u8"Детские товары", Category::allForChildrenAndMothers, nullopt, false, true},
+        {u8"🐾 Животные", u8"Животные", Category::animals, nullopt, false, true},
+        {u8"💄 Красота и здоровье", u8"Красота и здоровье", Category::beautyAndHealth, nullopt, false, true}
     };
     return choices;
+}
+
+vector<const CategoryChoice *> categoryChoicesForPage(const CategoryMenuPage page) {
+    vector<const CategoryChoice *> result;
+    const bool secondaryPage = page == CategoryMenuPage::more;
+    for (const CategoryChoice &choice : categoryChoices()) {
+        if (choice.secondary == secondaryPage) {
+            result.push_back(&choice);
+        }
+    }
+    return result;
 }
 
 CategoryChoice automaticCategoryFor(const string &tag) {
@@ -337,9 +377,13 @@ string categoryName(const QuerySubscription &subscription) {
         case Category::phonesAndTablets: return u8"Телефоны и планшеты";
         case Category::electronics: return u8"Электроника";
         case Category::everythingForHome: return u8"Всё для дома";
+        case Category::furniture: return u8"Мебель";
         case Category::repairAndBuilding: return u8"Ремонт и стройка";
         case Category::garden: return u8"Сад";
         case Category::hobbiesSportsAndTourism: return u8"Хобби и спорт";
+        case Category::allForChildrenAndMothers: return u8"Детские товары";
+        case Category::animals: return u8"Животные";
+        case Category::beautyAndHealth: return u8"Красота и здоровье";
         case Category::readyBusinessAndEquipment: return u8"Оборудование";
         default: return u8"Другая категория";
     }
@@ -450,7 +494,7 @@ vector<vector<string>> mainMenuKeyboard() {
     return {
         {u8"📋 Мои запросы"},
         {u8"➕ Добавить запрос", u8"➖ Удалить запрос"},
-        {u8"ℹ️ Статус"}
+        {u8"ℹ️ Статус", u8"❓ Помощь"}
     };
 }
 
@@ -511,14 +555,19 @@ string selectedCategoriesText(const MenuState &menuState) {
 
 vector<vector<string>> categoryKeyboard(const MenuState &menuState) {
     vector<vector<string>> keyboard;
-    const vector<CategoryChoice> &choices = categoryChoices();
+    const vector<const CategoryChoice *> choices = categoryChoicesForPage(menuState.categoryPage);
     for (size_t index = 0; index < choices.size(); index += 2) {
-        vector<string> row = {categoryButtonText(menuState, choices[index])};
+        vector<string> row = {categoryButtonText(menuState, *choices[index])};
         if (index + 1 < choices.size()) {
-            row.push_back(categoryButtonText(menuState, choices[index + 1]));
+            row.push_back(categoryButtonText(menuState, *choices[index + 1]));
         }
         keyboard.push_back(row);
     }
+    keyboard.push_back({
+        menuState.categoryPage == CategoryMenuPage::popular
+            ? u8"📚 Ещё категории"
+            : u8"⭐ Основные категории"
+    });
     keyboard.push_back({sellerFilterButtonText(menuState)});
     keyboard.push_back({categoryConfirmButton(menuState.pendingCategories.size())});
     keyboard.push_back({u8"↩️ Отмена"});
@@ -791,6 +840,7 @@ int main(int argc, char **argv) {
     vector<int> legacyViewedAds;
     vector<string> legacyInitializedQueries;
     map<string, int> legacyAdPrices;
+    map<string, int> legacyAdLowestPrices;
     int64_t telegramUpdateOffset = 0;
     if (programConfiguration.files.cache.contents.is_array()) {
         legacyViewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
@@ -798,16 +848,20 @@ int main(int argc, char **argv) {
         legacyViewedAds = programConfiguration.files.cache.contents.value("viewed-ads", vector<int>{});
         legacyInitializedQueries = programConfiguration.files.cache.contents.value("initialized-queries", vector<string>{});
         legacyAdPrices = programConfiguration.files.cache.contents.value("ad-prices", map<string, int>{});
+        legacyAdLowestPrices = programConfiguration.files.cache.contents.value("ad-lowest-prices", legacyAdPrices);
         telegramUpdateOffset = programConfiguration.files.cache.contents.value("telegram-update-offset", int64_t{0});
 
         if (programConfiguration.files.cache.contents.contains("recipients")) {
             const json &recipientsCache = programConfiguration.files.cache.contents.at("recipients");
             for (auto item = recipientsCache.begin(); item != recipientsCache.end(); ++item) {
                 const int64_t chatID = stoll(item.key());
+                const map<string, int> adPrices =
+                    item.value().value("ad-prices", map<string, int>{});
                 recipientCaches[chatID] = {
                     item.value().value("viewed-ads", vector<int>{}),
                     item.value().value("initialized-queries", vector<string>{}),
-                    item.value().value("ad-prices", map<string, int>{})
+                    adPrices,
+                    item.value().value("ad-lowest-prices", adPrices)
                 };
             }
         }
@@ -818,7 +872,8 @@ int main(int argc, char **argv) {
         recipientCaches[programConfiguration.telegramConfiguration.chatID] = {
             legacyViewedAds,
             legacyInitializedQueries,
-            legacyAdPrices
+            legacyAdPrices,
+            legacyAdLowestPrices
         };
     }
 
@@ -828,7 +883,8 @@ int main(int argc, char **argv) {
             recipientsCache[to_string(chatID)] = {
                 {"viewed-ads", recipientCache.viewedAds},
                 {"initialized-queries", recipientCache.initializedQueries},
-                {"ad-prices", recipientCache.adPrices}
+                {"ad-prices", recipientCache.adPrices},
+                {"ad-lowest-prices", recipientCache.adLowestPrices}
             };
         }
         json cacheData = {
@@ -881,6 +937,18 @@ int main(int argc, char **argv) {
                         u8"👋 Главное меню\n\n"
                         u8"Здесь можно посмотреть, добавить или удалить поисковые запросы. "
                         u8"Просто нажмите нужную кнопку."
+                    );
+                    continue;
+                }
+
+                if (isTelegramCommand(text, "/help") || text == u8"❓ Помощь") {
+                    menuState = MenuState{};
+                    sendMainMenu(
+                        u8"❓ Как пользоваться ботом\n\n"
+                        u8"1. Нажмите «Добавить запрос» и напишите, что искать.\n"
+                        u8"2. Выберите одну или несколько категорий. Редкие категории спрятаны под кнопкой «Ещё категории».\n"
+                        u8"3. При желании включите «Только частные продавцы» и подтвердите выбор.\n\n"
+                        u8"Бот пришлёт только новые объявления. Если известный товар станет дешевле своей прежней минимальной цены, придёт отдельное уведомление со скидкой в процентах."
                     );
                     continue;
                 }
@@ -974,6 +1042,20 @@ int main(int argc, char **argv) {
                 }
 
                 if (menuState.step == MenuStep::waitingForCategory) {
+                    if (text == u8"📚 Ещё категории" || text == u8"⭐ Основные категории") {
+                        menuState.categoryPage = text == u8"📚 Ещё категории"
+                            ? CategoryMenuPage::more
+                            : CategoryMenuPage::popular;
+                        sendTextMessageWithKeyboard(
+                            telegramConfiguration,
+                            menuState.categoryPage == CategoryMenuPage::more
+                                ? u8"📚 Дополнительные категории\n\nВыбор сохранён — можно отметить ещё несколько вариантов."
+                                : u8"⭐ Основные категории\n\nВыбор сохранён — можно продолжить или добавить запрос.",
+                            categoryKeyboard(menuState)
+                        );
+                        continue;
+                    }
+
                     if (text == sellerFilterButtonText(menuState)) {
                         menuState.privateSellersOnly = !menuState.privateSellersOnly;
                         sendTextMessageWithKeyboard(
@@ -1320,6 +1402,9 @@ int main(int argc, char **argv) {
                             // Initial query priming remains silent and is stored immediately.
                             recipientCache.viewedAds.push_back(advert.id);
                             recipientCache.adPrices[advertID] = advert.price;
+                            if (advert.price > 0) {
+                                recipientCache.adLowestPrices[advertID] = advert.price;
+                            }
                             cacheChanged = true;
                         }
                     } else {
@@ -1327,15 +1412,24 @@ int main(int argc, char **argv) {
                         if (previousPrice == recipientCache.adPrices.end()) {
                             // Migration from the old cache format: establish a baseline silently.
                             recipientCache.adPrices[advertID] = advert.price;
+                            if (advert.price > 0) {
+                                recipientCache.adLowestPrices[advertID] = advert.price;
+                            }
                             cacheChanged = true;
                         } else if (previousPrice->second != advert.price) {
                             const int oldPrice = previousPrice->second;
+                            const auto lowestPrice = recipientCache.adLowestPrices.find(advertID);
+                            const int oldLowestPrice = lowestPrice != recipientCache.adLowestPrices.end()
+                                ? lowestPrice->second
+                                : oldPrice;
+                            const bool newLowestPrice = isNewLowestPrice(advert.price, oldLowestPrice);
                             bool rememberNewPrice = true;
 
-                            if (queryInitialized && advert.price < oldPrice) {
+                            if (queryInitialized && newLowestPrice) {
                                 cout << "[PRICE DROP]: Chat " << subscription.chatID
                                      << ", ad=" << advert.id
                                      << ", old=" << oldPrice
+                                     << ", previous-low=" << oldLowestPrice
                                      << ", new=" << advert.price << endl;
                                 rememberNewPrice = false;
 
@@ -1352,8 +1446,13 @@ int main(int argc, char **argv) {
                             }
 
                             if (rememberNewPrice) {
-                                // A failed price-drop notification is retried on the next cycle.
+                                // A failed new-low notification is retried on the next cycle.
                                 previousPrice->second = advert.price;
+                                if (advert.price > 0 &&
+                                    (lowestPrice == recipientCache.adLowestPrices.end() ||
+                                     advert.price < lowestPrice->second)) {
+                                    recipientCache.adLowestPrices[advertID] = advert.price;
+                                }
                                 cacheChanged = true;
                             }
                         }

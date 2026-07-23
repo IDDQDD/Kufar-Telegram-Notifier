@@ -154,7 +154,8 @@ namespace Telegram {
             {{"command", "queries"}, {"description", u8"Показать мои запросы"}},
             {{"command", "add"}, {"description", u8"Добавить запрос"}},
             {{"command", "delete"}, {"description", u8"Удалить запрос"}},
-            {{"command", "status"}, {"description", u8"Проверить работу бота"}}
+            {{"command", "status"}, {"description", u8"Проверить работу бота"}},
+            {{"command", "help"}, {"description", u8"Как пользоваться ботом"}}
         });
         const string url = "https://api.telegram.org/bot" + botToken + "/setMyCommands";
         const json request = {{"commands", commands}};
@@ -215,11 +216,17 @@ namespace Telegram {
         const int previousPrice
     ) {
         const int difference = previousPrice - ad.price;
-        string text = "💸 Цена снижена\n\n"
+        const int percentage = previousPrice > 0
+            ? static_cast<int>(
+                (static_cast<long long>(difference) * 100 + previousPrice / 2) / previousPrice
+            )
+            : 0;
+        string text = "💸 Новая минимальная цена\n\n"
                       "Название: " + ad.title + "\n"
                       "Было: " + formatPrice(previousPrice) + "\n"
                       "Стало: " + formatPrice(ad.price) + "\n"
-                      "Снижение: " + formatPrice(difference) + "\n\n"
+                      "Выгода: " + formatPrice(difference) +
+                      (percentage > 0 ? " (" + to_string(percentage) + "%)" : "") + "\n\n"
                       "Ссылка: " + ad.link;
 
         sendTextMessage(telegramConfiguration, text);
