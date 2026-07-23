@@ -20,7 +20,7 @@ namespace Telegram {
     using namespace Networking;
     using nlohmann::json;
 
-    const short int MAX_IMAGES_IN_GROUP = 10;
+    const size_t MAX_IMAGES_IN_GROUP = 10;
 
     namespace {
         json parseTelegramResponse(const string &responseBody) {
@@ -131,7 +131,7 @@ namespace Telegram {
 
         const json &updates = response.at("result");
         for (auto update = updates.rbegin(); update != updates.rend(); ++update) {
-            for (const string &messageType : {"message", "edited_message", "channel_post"}) {
+            for (const char *messageType : {"message", "edited_message", "channel_post"}) {
                 if (update->contains(messageType) && update->at(messageType).contains("chat")) {
                     return update->at(messageType).at("chat").at("id").get<int64_t>();
                 }
@@ -219,7 +219,7 @@ namespace Telegram {
 
     string makeImageGroupJSON(const vector<string> &images, const string &caption) {
         json j_array = json::array();
-        for (int i = 0; (i < images.size()) && (i < MAX_IMAGES_IN_GROUP); i++){
+        for (size_t i = 0; (i < images.size()) && (i < MAX_IMAGES_IN_GROUP); ++i) {
             json j_list = json::object({
                     {"type", "photo"},
                     {"media", images[i]}

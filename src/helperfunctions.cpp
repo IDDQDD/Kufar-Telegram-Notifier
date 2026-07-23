@@ -124,8 +124,9 @@ void saveFile(const string &path, const string &contents) {
 
     optional<string> getWorkingDirectory() {
         char result[PATH_MAX];
-        size_t count = readlink("/proc/self/exe", result, PATH_MAX);
-        if (count != -1) {
+        const ssize_t count = readlink("/proc/self/exe", result, sizeof(result) - 1);
+        if (count >= 0) {
+            result[count] = '\0';
             return dirname(result);
         }
         return nullopt;

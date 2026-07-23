@@ -85,6 +85,16 @@ namespace {
         filesystem::remove(testPath);
     }
 
+    void testExecutableDirectoryResolution() {
+#if defined(__linux__)
+        const optional<string> executableDirectory = getWorkingDirectory();
+        require(
+            executableDirectory.has_value() && !executableDirectory->empty(),
+            "Linux executable directory must be resolved safely"
+        );
+#endif
+    }
+
     void testCycleTiming() {
         require(remainingCycleDelay(300, 180) == 120, "cycle must wait until five minutes");
         require(remainingCycleDelay(300, 320) == 0, "slow cycles must not use a negative delay");
@@ -193,6 +203,7 @@ int main() {
     testMultiwordMatching();
     testGroupedQueriesAndDeletionKeyboard();
     testAtomicCacheWrite();
+    testExecutableDirectoryResolution();
     testCycleTiming();
     testCategoryMenuPages();
     testPriceDropRules();
