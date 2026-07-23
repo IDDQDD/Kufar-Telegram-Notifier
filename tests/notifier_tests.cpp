@@ -128,6 +128,26 @@ namespace {
         require(!isNewLowestPrice(10500, 10000), "a fake discount above the previous minimum must not trigger");
         require(!isNewLowestPrice(0, 10000), "zero or negotiable price must not trigger");
     }
+
+    void testVisualMenuAndMediaDelivery() {
+        const vector<vector<string>> menu = mainMenuKeyboard();
+        require(menu.size() == 3, "main menu must stay compact");
+        require(menu[0].size() == 1, "primary search action must have its own row");
+        require(menu[0][0] == u8"🔎 Мои поиски", "main menu must use the new search label");
+
+        require(
+            advertMediaModeForImageCount(0) == AdvertMediaMode::text,
+            "ad without images must be sent as text"
+        );
+        require(
+            advertMediaModeForImageCount(1) == AdvertMediaMode::photo,
+            "single-image ad must use sendPhoto"
+        );
+        require(
+            advertMediaModeForImageCount(2) == AdvertMediaMode::album,
+            "multiple images must use a media album"
+        );
+    }
 }
 
 int main() {
@@ -137,5 +157,6 @@ int main() {
     testCycleTiming();
     testCategoryMenuPages();
     testPriceDropRules();
+    testVisualMenuAndMediaDelivery();
     return 0;
 }

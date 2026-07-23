@@ -8,6 +8,7 @@
 #ifndef Header_hpp
 #define Header_hpp
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -18,6 +19,12 @@ namespace Kufar {
 }
 
 namespace Telegram {
+    enum class AdvertMediaMode {
+        text,
+        photo,
+        album
+    };
+
     struct TelegramConfiguration {
         std::string botToken;
         int64_t chatID;
@@ -38,6 +45,7 @@ namespace Telegram {
         const std::vector<std::vector<std::string>> &
     );
     void setBotCommands(const std::string &);
+    AdvertMediaMode advertMediaModeForImageCount(std::size_t);
     void sendAdvert(const TelegramConfiguration &, const Kufar::Ad &);
     void sendPriceDrop(const TelegramConfiguration &, const Kufar::Ad &, int);
 };

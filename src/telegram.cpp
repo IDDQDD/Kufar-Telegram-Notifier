@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <ctime>
 #include "kufar.hpp"
 #include "telegram.hpp"
 #include "networking.hpp"
@@ -45,10 +46,53 @@ namespace Telegram {
             return stream.str() + " BYN";
         }
 
+        string escapeHTML(const string &value) {
+            string escaped;
+            escaped.reserve(value.size());
+            for (const char character : value) {
+                switch (character) {
+                    case '&': escaped += "&amp;"; break;
+                    case '<': escaped += "&lt;"; break;
+                    case '>': escaped += "&gt;"; break;
+                    case '"': escaped += "&quot;"; break;
+                    default: escaped += character; break;
+                }
+            }
+            return escaped;
+        }
+
+        string formatDate(const time_t timestamp) {
+            const tm *date = gmtime(&timestamp);
+            if (date == nullptr) {
+                return u8"время не указано";
+            }
+
+            ostringstream stream;
+            stream << put_time(date, "%d.%m.%Y · %H:%M");
+            return stream.str();
+        }
+
+        string makeAdvertCard(const Kufar::Ad &ad) {
+            ostringstream text;
+            text << u8"🔔 <b>Новое объявление</b>\n\n"
+                 << "<b>" << escapeHTML(ad.title) << "</b>\n";
+            if (ad.tag.has_value()) {
+                text << u8"🔎 Запрос: <code>" << escapeHTML(ad.tag.value()) << "</code>\n";
+            }
+            text << u8"💰 <b>" << formatPrice(ad.price) << "</b>\n"
+                 << u8"👤 " << escapeHTML(ad.sellerName) << "\n"
+                 << u8"🗓 " << formatDate(ad.date) << "\n"
+                 << (ad.phoneNumberIsVisible ? u8"📞 Телефон открыт" : u8"🔒 Телефон скрыт")
+                 << "\n\n"
+                 << "<a href=\"" << escapeHTML(ad.link) << u8"\">Открыть на Kufar →</a>";
+            return text.str();
+        }
+
         void sendTextMessageRequest(
             const TelegramConfiguration &telegramConfiguration,
             const string &text,
-            const optional<string> &replyMarkup
+            const optional<string> &replyMarkup,
+            const optional<string> &parseMode
         ) {
             const string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken +
                                "/sendMessage";
@@ -60,6 +104,9 @@ namespace Telegram {
 
             if (replyMarkup.has_value()) {
                 request["reply_markup"] = json::parse(replyMarkup.value());
+            }
+            if (parseMode.has_value()) {
+                request["parse_mode"] = parseMode.value();
             }
 
             parseTelegramResponse(postJSONToURL(url, request.dump()));
@@ -122,7 +169,7 @@ namespace Telegram {
     }
 
     void sendTextMessage(const TelegramConfiguration &telegramConfiguration, const string &text) {
-        sendTextMessageRequest(telegramConfiguration, text, nullopt);
+        sendTextMessageRequest(telegramConfiguration, text, nullopt, nullopt);
     }
 
     void sendTextMessageWithKeyboard(
@@ -145,17 +192,17 @@ namespace Telegram {
             {"one_time_keyboard", false},
             {"input_field_placeholder", u8"Выберите действие"}
         };
-        sendTextMessageRequest(telegramConfiguration, text, replyMarkup.dump());
+        sendTextMessageRequest(telegramConfiguration, text, replyMarkup.dump(), nullopt);
     }
 
     void setBotCommands(const string &botToken) {
         const json commands = json::array({
-            {{"command", "menu"}, {"description", u8"Открыть простое меню"}},
-            {{"command", "queries"}, {"description", u8"Показать мои запросы"}},
-            {{"command", "add"}, {"description", u8"Добавить запрос"}},
-            {{"command", "delete"}, {"description", u8"Удалить запрос"}},
-            {{"command", "status"}, {"description", u8"Проверить работу бота"}},
-            {{"command", "help"}, {"description", u8"Как пользоваться ботом"}}
+            {{"command", "menu"}, {"description", u8"Открыть главное меню"}},
+            {{"command", "queries"}, {"description", u8"Показать мои поиски"}},
+            {{"command", "add"}, {"description", u8"Создать новый поиск"}},
+            {{"command", "delete"}, {"description", u8"Удалить поиск"}},
+            {{"command", "status"}, {"description", u8"Проверить состояние бота"}},
+            {{"command", "help"}, {"description", u8"Как всё работает"}}
         });
         const string url = "https://api.telegram.org/bot" + botToken + "/setMyCommands";
         const json request = {{"commands", commands}};
@@ -172,6 +219,7 @@ namespace Telegram {
             
             if (i == 0) {
                 j_list.push_back({"caption", caption});
+                j_list.push_back({"parse_mode", "HTML"});
             }
             j_array.push_back(j_list);
         }
@@ -179,25 +227,35 @@ namespace Telegram {
         return j_array.dump();
     }
 
-    void sendAdvert(const TelegramConfiguration &telegramConfiguration, const Kufar::Ad &ad) {
-        string formattedTime = ctime(&ad.date);
-        formattedTime.pop_back();
-        
-        string text = "";
-        
-        if (ad.tag.has_value()) {
-            text += "#" + ad.tag.value() + "\n";
+    AdvertMediaMode advertMediaModeForImageCount(const size_t imageCount) {
+        if (imageCount == 0) {
+            return AdvertMediaMode::text;
         }
-        
-        text += "Название: " + ad.title + "\n"
-                "Дата: " + formattedTime + "\n"
-                "Цена: " + formatPrice(ad.price) + "\n\n"
-                "Имя продавца: " + ad.sellerName + "\n"
-                "Номер телефона не скрыт: " + (ad.phoneNumberIsVisible ? "Да" : "Нет") + "\n"
-                "Ссылка: " + ad.link;
-        
-        if (ad.images.empty()) {
-            sendTextMessage(telegramConfiguration, text);
+        if (imageCount == 1) {
+            return AdvertMediaMode::photo;
+        }
+        return AdvertMediaMode::album;
+    }
+
+    void sendAdvert(const TelegramConfiguration &telegramConfiguration, const Kufar::Ad &ad) {
+        const string text = makeAdvertCard(ad);
+        const AdvertMediaMode mediaMode = advertMediaModeForImageCount(ad.images.size());
+
+        if (mediaMode == AdvertMediaMode::text) {
+            sendTextMessageRequest(telegramConfiguration, text, nullopt, string("HTML"));
+            return;
+        }
+
+        if (mediaMode == AdvertMediaMode::photo) {
+            const string url = "https://api.telegram.org/bot" + telegramConfiguration.botToken +
+                               "/sendPhoto";
+            const json request = {
+                {"chat_id", telegramConfiguration.chatID},
+                {"photo", ad.images.front()},
+                {"caption", text},
+                {"parse_mode", "HTML"}
+            };
+            parseTelegramResponse(postJSONToURL(url, request.dump()));
             return;
         }
 
@@ -221,14 +279,16 @@ namespace Telegram {
                 (static_cast<long long>(difference) * 100 + previousPrice / 2) / previousPrice
             )
             : 0;
-        string text = "💸 Новая минимальная цена\n\n"
-                      "Название: " + ad.title + "\n"
-                      "Было: " + formatPrice(previousPrice) + "\n"
-                      "Стало: " + formatPrice(ad.price) + "\n"
-                      "Выгода: " + formatPrice(difference) +
-                      (percentage > 0 ? " (" + to_string(percentage) + "%)" : "") + "\n\n"
-                      "Ссылка: " + ad.link;
+        const string percentageText = percentage > 0
+            ? u8"−" + to_string(percentage) + "%"
+            : u8"снижение цены";
+        string text = u8"💸 <b>Новая минимальная цена</b>\n\n"
+                      "<b>" + escapeHTML(ad.title) + "</b>\n"
+                      u8"💰 <s>" + formatPrice(previousPrice) + "</s> → <b>" +
+                      formatPrice(ad.price) + "</b>\n"
+                      u8"📉 " + percentageText + u8" · выгода " + formatPrice(difference) + "\n\n"
+                      "<a href=\"" + escapeHTML(ad.link) + u8"\">Открыть на Kufar →</a>";
 
-        sendTextMessage(telegramConfiguration, text);
+        sendTextMessageRequest(telegramConfiguration, text, nullopt, string("HTML"));
     }
 };

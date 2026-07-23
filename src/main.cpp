@@ -411,7 +411,7 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
 
     const vector<QueryDisplayGroup> groups = groupQueries(subscriptions);
     ostringstream text;
-    text << u8"📋 Ваши запросы: " << groups.size();
+    text << u8"🔎 Мои поиски: " << groups.size();
     if (groups.size() != subscriptions.size()) {
         text << u8"  •  поисков по категориям: " << subscriptions.size();
     }
@@ -419,7 +419,7 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
 
     for (size_t index = 0; index < groups.size(); ++index) {
         const QueryDisplayGroup &group = groups[index];
-        text << index + 1 << u8". 🔎 " << group.tag << u8" — 📂 ";
+        text << index + 1 << u8". " << group.tag << u8"  •  📂 ";
         for (size_t categoryIndex = 0; categoryIndex < group.categories.size(); ++categoryIndex) {
             if (categoryIndex > 0) {
                 text << u8" • ";
@@ -492,9 +492,9 @@ size_t removeGroupedQueries(
 
 vector<vector<string>> mainMenuKeyboard() {
     return {
-        {u8"📋 Мои запросы"},
-        {u8"➕ Добавить запрос", u8"➖ Удалить запрос"},
-        {u8"ℹ️ Статус", u8"❓ Помощь"}
+        {u8"🔎 Мои поиски"},
+        {u8"➕ Новый поиск", u8"🗑 Удалить"},
+        {u8"📊 Состояние", u8"❓ Как пользоваться"}
     };
 }
 
@@ -525,7 +525,7 @@ string categoryButtonText(const MenuState &menuState, const CategoryChoice &choi
 }
 
 string categoryConfirmButton(const size_t count) {
-    return u8"✅ Добавить выбранные (" + to_string(count) + ")";
+    return u8"✅ Сохранить поиск (" + to_string(count) + ")";
 }
 
 string sellerFilterButtonText(const MenuState &menuState) {
@@ -934,26 +934,32 @@ int main(int argc, char **argv) {
                     text == u8"↩️ Отмена") {
                     menuState = MenuState{};
                     sendMainMenu(
-                        u8"👋 Главное меню\n\n"
-                        u8"Здесь можно посмотреть, добавить или удалить поисковые запросы. "
-                        u8"Просто нажмите нужную кнопку."
+                        u8"🏠 ПОИСК НА KUFAR\n\n"
+                        u8"Что хотите сделать?\n"
+                        u8"Выберите кнопку — бот подскажет следующий шаг."
                     );
                     continue;
                 }
 
-                if (isTelegramCommand(text, "/help") || text == u8"❓ Помощь") {
+                if (isTelegramCommand(text, "/help") ||
+                    text == u8"❓ Помощь" ||
+                    text == u8"❓ Как пользоваться") {
                     menuState = MenuState{};
                     sendMainMenu(
-                        u8"❓ Как пользоваться ботом\n\n"
-                        u8"1. Нажмите «Добавить запрос» и напишите, что искать.\n"
-                        u8"2. Выберите одну или несколько категорий. Редкие категории спрятаны под кнопкой «Ещё категории».\n"
-                        u8"3. При желании включите «Только частные продавцы» и подтвердите выбор.\n\n"
-                        u8"Бот пришлёт только новые объявления. Если известный товар станет дешевле своей прежней минимальной цены, придёт отдельное уведомление со скидкой в процентах."
+                        u8"❓ КАК ЭТО РАБОТАЕТ\n\n"
+                        u8"1️⃣ Создайте новый поиск и напишите название товара.\n"
+                        u8"2️⃣ Отметьте одну или несколько категорий.\n"
+                        u8"3️⃣ При желании оставьте только частных продавцов.\n"
+                        u8"4️⃣ Сохраните — старые объявления запомнятся молча.\n\n"
+                        u8"🔔 Затем бот присылает только новые объявления.\n"
+                        u8"💸 Новая минимальная цена приходит отдельной карточкой."
                     );
                     continue;
                 }
 
-                if (isTelegramCommand(text, "/queries") || text == u8"📋 Мои запросы") {
+                if (isTelegramCommand(text, "/queries") ||
+                    text == u8"📋 Мои запросы" ||
+                    text == u8"🔎 Мои поиски") {
                     menuState = MenuState{};
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
@@ -963,18 +969,24 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
-                if (isTelegramCommand(text, "/add") || text == u8"➕ Добавить запрос") {
+                if (isTelegramCommand(text, "/add") ||
+                    text == u8"➕ Добавить запрос" ||
+                    text == u8"➕ Новый поиск") {
                     menuState = MenuState{};
                     menuState.step = MenuStep::waitingForQuery;
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
-                        u8"➕ Напишите, что нужно искать.\n\nНапример: гиря 24 кг",
+                        u8"1️⃣ ШАГ 1 ИЗ 2 · ЧТО ИСКАТЬ\n\n"
+                        u8"Напишите название товара или точную фразу.\n\n"
+                        u8"Например: гиря 24 кг",
                         {{u8"↩️ Отмена"}}
                     );
                     continue;
                 }
 
-                if (isTelegramCommand(text, "/delete") || text == u8"➖ Удалить запрос") {
+                if (isTelegramCommand(text, "/delete") ||
+                    text == u8"➖ Удалить запрос" ||
+                    text == u8"🗑 Удалить") {
                     menuState = MenuState{};
                     const vector<QuerySubscription> subscriptions = subscriptionsForChat(
                         programConfiguration,
@@ -987,7 +999,7 @@ int main(int argc, char **argv) {
                         menuState.step = MenuStep::waitingForDelete;
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
-                            u8"➖ Какой запрос удалить?\n\n"
+                            u8"🗑 УДАЛЕНИЕ ПОИСКА\n\n"
                             u8"Будут удалены все его категории. Нажмите на запрос:",
                             deleteKeyboard(groups)
                         );
@@ -995,7 +1007,9 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
-                if (isStatusCommand(text) || text == u8"ℹ️ Статус") {
+                if (isStatusCommand(text) ||
+                    text == u8"ℹ️ Статус" ||
+                    text == u8"📊 Состояние") {
                     const size_t queryCount = count_if(
                         programConfiguration.subscriptions.begin(),
                         programConfiguration.subscriptions.end(),
@@ -1005,12 +1019,13 @@ int main(int argc, char **argv) {
                     );
 
                     ostringstream status;
-                    status << u8"✅ Бот работает\n\n"
-                       << u8"Активных запросов: " << queryCount << "\n"
-                       << u8"Последняя успешная проверка: "
+                    status << u8"🟢 БОТ РАБОТАЕТ\n\n"
+                       << u8"🔎 Активных поисков: " << queryCount << "\n"
+                       << u8"🕘 Последняя проверка: "
                        << formatElapsed(lastSuccessfulCheckByChat[update.chatID]) << "\n"
-                       << u8"Объявлений в кэше: "
-                       << recipientCaches[update.chatID].viewedAds.size();
+                       << u8"🗃 Объявлений в памяти: "
+                       << recipientCaches[update.chatID].viewedAds.size() << "\n"
+                       << u8"⏱ Полный цикл: примерно каждые 5 минут";
 
                     sendTextMessageWithKeyboard(telegramConfiguration, status.str(), mainMenuKeyboard());
                     cout << "[STATUS]: Replied to chat " << update.chatID << endl;
@@ -1031,11 +1046,11 @@ int main(int argc, char **argv) {
                     menuState.step = MenuStep::waitingForCategory;
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
-                        u8"📂 Где искать?\n\n"
+                        u8"2️⃣ ШАГ 2 ИЗ 2 · ГДЕ ИСКАТЬ\n\n"
                         u8"Выберите одну или несколько категорий. Повторное нажатие снимает галочку.\n"
                         u8"«Все категории» включает широкий поиск и выбирается отдельно.\n\n"
-                        u8"Выбрано: " + selectedCategoriesText(menuState) +
-                        u8"\nПродавцы: " + sellerFilterText(menuState),
+                        u8"📂 Выбрано: " + selectedCategoriesText(menuState) +
+                        u8"\n👤 Продавцы: " + sellerFilterText(menuState),
                         categoryKeyboard(menuState)
                     );
                     continue;
@@ -1049,8 +1064,10 @@ int main(int argc, char **argv) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
                             menuState.categoryPage == CategoryMenuPage::more
-                                ? u8"📚 Дополнительные категории\n\nВыбор сохранён — можно отметить ещё несколько вариантов."
-                                : u8"⭐ Основные категории\n\nВыбор сохранён — можно продолжить или добавить запрос.",
+                                ? u8"📚 ДОПОЛНИТЕЛЬНЫЕ КАТЕГОРИИ\n\n"
+                                  u8"📂 Уже выбрано: " + selectedCategoriesText(menuState)
+                                : u8"⭐ ОСНОВНЫЕ КАТЕГОРИИ\n\n"
+                                  u8"📂 Уже выбрано: " + selectedCategoriesText(menuState),
                             categoryKeyboard(menuState)
                         );
                         continue;
@@ -1060,9 +1077,9 @@ int main(int argc, char **argv) {
                         menuState.privateSellersOnly = !menuState.privateSellersOnly;
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
-                            u8"👤 Фильтр продавцов изменён.\n\n"
-                            u8"Выбрано: " + selectedCategoriesText(menuState) +
-                            u8"\nПродавцы: " + sellerFilterText(menuState),
+                            u8"👤 ПРОДАВЦЫ\n\n"
+                            u8"📂 Выбрано: " + selectedCategoriesText(menuState) +
+                            u8"\n👤 Режим: " + sellerFilterText(menuState),
                             categoryKeyboard(menuState)
                         );
                         continue;
@@ -1117,9 +1134,10 @@ int main(int argc, char **argv) {
                     if (categoryButtonPressed) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
-                            u8"📂 Выберите ещё категории или нажмите «Добавить выбранные».\n\n"
-                            u8"Выбрано: " + selectedCategoriesText(menuState) +
-                            u8"\nПродавцы: " + sellerFilterText(menuState),
+                            u8"2️⃣ ШАГ 2 ИЗ 2 · ПОЧТИ ГОТОВО\n\n"
+                            u8"📂 Выбрано: " + selectedCategoriesText(menuState) +
+                            u8"\n👤 Продавцы: " + sellerFilterText(menuState) +
+                            u8"\n\nНажмите «Сохранить поиск» или отметьте ещё категории.",
                             categoryKeyboard(menuState)
                         );
                         continue;
@@ -1128,9 +1146,10 @@ int main(int argc, char **argv) {
                     if (text != categoryConfirmButton(menuState.pendingCategories.size())) {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
-                            u8"Выберите категории галочками, затем нажмите «Добавить выбранные».\n\n"
-                            u8"Выбрано: " + selectedCategoriesText(menuState) +
-                            u8"\nПродавцы: " + sellerFilterText(menuState),
+                            u8"2️⃣ ШАГ 2 ИЗ 2\n\n"
+                            u8"Отметьте хотя бы одну категорию, затем нажмите «Сохранить поиск».\n\n"
+                            u8"📂 Выбрано: " + selectedCategoriesText(menuState) +
+                            u8"\n👤 Продавцы: " + sellerFilterText(menuState),
                             categoryKeyboard(menuState)
                         );
                         continue;
@@ -1215,7 +1234,8 @@ int main(int argc, char **argv) {
                     }
 
                     ostringstream resultMessage;
-                    resultMessage << u8"✅ Запрос добавлен\n\n🔎 " << addedTag
+                    resultMessage << u8"✅ ПОИСК СОХРАНЁН\n\n"
+                                  << u8"🔎 " << addedTag
                                   << u8"\n📂 Категорий: " << addedCategories.size() << "\n";
                     for (const string &category : addedCategories) {
                         resultMessage << u8"• " << category << "\n";
@@ -1225,7 +1245,8 @@ int main(int argc, char **argv) {
                     if (duplicateCount > 0) {
                         resultMessage << u8"\nУже существующих сочетаний пропущено: " << duplicateCount << "\n";
                     }
-                    resultMessage << u8"\nСтарые объявления будут запомнены без рассылки; придут только новые.";
+                    resultMessage << u8"\n🔕 Старые объявления запомнятся молча.\n"
+                                  << u8"🔔 Уведомления начнутся с новых находок.";
                     sendMainMenu(
                         resultMessage.str()
                     );
