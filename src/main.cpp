@@ -411,7 +411,7 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
 
     const vector<QueryDisplayGroup> groups = groupQueries(subscriptions);
     ostringstream text;
-    text << u8"🔎 Мои поиски: " << groups.size();
+    text << u8"🔎 Мои запросы: " << groups.size();
     if (groups.size() != subscriptions.size()) {
         text << u8"  •  поисков по категориям: " << subscriptions.size();
     }
@@ -492,8 +492,8 @@ size_t removeGroupedQueries(
 
 vector<vector<string>> mainMenuKeyboard() {
     return {
-        {u8"🔎 Мои поиски"},
-        {u8"➕ Новый поиск", u8"🗑 Удалить"},
+        {u8"🔎 Мои запросы"},
+        {u8"➕ Новый запрос", u8"🗑 Удалить"},
         {u8"📊 Состояние", u8"❓ Как пользоваться"}
     };
 }
@@ -959,6 +959,7 @@ int main(int argc, char **argv) {
 
                 if (isTelegramCommand(text, "/queries") ||
                     text == u8"📋 Мои запросы" ||
+                    text == u8"🔎 Мои запросы" ||
                     text == u8"🔎 Мои поиски") {
                     menuState = MenuState{};
                     sendTextMessageWithKeyboard(
@@ -971,6 +972,7 @@ int main(int argc, char **argv) {
 
                 if (isTelegramCommand(text, "/add") ||
                     text == u8"➕ Добавить запрос" ||
+                    text == u8"➕ Новый запрос" ||
                     text == u8"➕ Новый поиск") {
                     menuState = MenuState{};
                     menuState.step = MenuStep::waitingForQuery;

@@ -35,6 +35,10 @@ namespace Telegram {
         }
 
         string formatPrice(const int price) {
+            if (price == 0) {
+                return u8"Договорная";
+            }
+
             ostringstream stream;
             stream << price / 100;
 
@@ -74,12 +78,11 @@ namespace Telegram {
 
         string makeAdvertCard(const Kufar::Ad &ad) {
             ostringstream text;
-            text << u8"🔔 <b>Новое объявление</b>\n\n"
-                 << "<b>" << escapeHTML(ad.title) << "</b>\n";
             if (ad.tag.has_value()) {
-                text << u8"🔎 Запрос: <code>" << escapeHTML(ad.tag.value()) << "</code>\n";
+                text << "#" << escapeHTML(ad.tag.value()) << "\n";
             }
-            text << u8"💰 <b>" << formatPrice(ad.price) << "</b>\n"
+            text << "<b>" << escapeHTML(ad.title) << "</b>\n"
+                 << u8"💰 <b>" << formatPrice(ad.price) << "</b>\n"
                  << u8"👤 " << escapeHTML(ad.sellerName) << "\n"
                  << u8"🗓 " << formatDate(ad.date) << "\n"
                  << (ad.phoneNumberIsVisible ? u8"📞 Телефон открыт" : u8"🔒 Телефон скрыт")
@@ -111,6 +114,10 @@ namespace Telegram {
 
             parseTelegramResponse(postJSONToURL(url, request.dump()));
         }
+    }
+
+    string formatAdvertCard(const Kufar::Ad &ad) {
+        return makeAdvertCard(ad);
     }
 
     optional<int64_t> getLatestChatID(const string &botToken) {
@@ -198,9 +205,9 @@ namespace Telegram {
     void setBotCommands(const string &botToken) {
         const json commands = json::array({
             {{"command", "menu"}, {"description", u8"Открыть главное меню"}},
-            {{"command", "queries"}, {"description", u8"Показать мои поиски"}},
-            {{"command", "add"}, {"description", u8"Создать новый поиск"}},
-            {{"command", "delete"}, {"description", u8"Удалить поиск"}},
+            {{"command", "queries"}, {"description", u8"Показать мои запросы"}},
+            {{"command", "add"}, {"description", u8"Создать новый запрос"}},
+            {{"command", "delete"}, {"description", u8"Удалить запрос"}},
             {{"command", "status"}, {"description", u8"Проверить состояние бота"}},
             {{"command", "help"}, {"description", u8"Как всё работает"}}
         });
@@ -238,7 +245,7 @@ namespace Telegram {
     }
 
     void sendAdvert(const TelegramConfiguration &telegramConfiguration, const Kufar::Ad &ad) {
-        const string text = makeAdvertCard(ad);
+        const string text = formatAdvertCard(ad);
         const AdvertMediaMode mediaMode = advertMediaModeForImageCount(ad.images.size());
 
         if (mediaMode == AdvertMediaMode::text) {

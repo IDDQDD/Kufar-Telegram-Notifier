@@ -133,7 +133,42 @@ namespace {
         const vector<vector<string>> menu = mainMenuKeyboard();
         require(menu.size() == 3, "main menu must stay compact");
         require(menu[0].size() == 1, "primary search action must have its own row");
-        require(menu[0][0] == u8"🔎 Мои поиски", "main menu must use the new search label");
+        require(menu[0][0] == u8"🔎 Мои запросы", "main menu must use the query list label");
+        require(menu[1][0] == u8"➕ Новый запрос", "main menu must use the new query label");
+
+        Kufar::Ad advert;
+        advert.tag = u8"на запчасти";
+        advert.title = u8"Магнитофон";
+        advert.date = 0;
+        advert.price = 2500;
+        advert.sellerName = u8"Продавец";
+        advert.phoneNumberIsVisible = false;
+        advert.link = "https://example.test/ad";
+
+        const string advertCard = formatAdvertCard(advert);
+        require(
+            advertCard.rfind(u8"#на запчасти\n", 0) == 0,
+            "advert card must start with the original hashtag format"
+        );
+        require(
+            advertCard.find(u8"Новое объявление") == string::npos,
+            "advert card must not include the redundant new advert heading"
+        );
+        require(
+            advertCard.find(u8"Запрос:") == string::npos,
+            "advert card must not include the verbose query label"
+        );
+
+        advert.price = 0;
+        const string negotiableAdvertCard = formatAdvertCard(advert);
+        require(
+            negotiableAdvertCard.find(u8"Договорная") != string::npos,
+            "zero Kufar price must be displayed as negotiable"
+        );
+        require(
+            negotiableAdvertCard.find(u8"0 BYN") == string::npos,
+            "negotiable price must not be displayed as zero"
+        );
 
         require(
             advertMediaModeForImageCount(0) == AdvertMediaMode::text,
