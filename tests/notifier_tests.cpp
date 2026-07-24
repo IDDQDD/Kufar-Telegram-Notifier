@@ -60,6 +60,24 @@ namespace {
             keyboard[0][0].find(u8"Блок питания") != string::npos,
             "delete button must use the display query text"
         );
+        require(
+            keyboard[0][0].find("(2") == string::npos,
+            "delete button must not show the number of category searches"
+        );
+
+        Kufar::Ad phoneAdvert;
+        phoneAdvert.phoneNumberIsVisible = true;
+        phoneAdvert.phoneNumber = "+375291112233";
+        require(
+            getPhoneNumber(phoneAdvert) == phoneAdvert.phoneNumber,
+            "an already available phone number must not trigger another request"
+        );
+        phoneAdvert.phoneNumber.reset();
+        phoneAdvert.phoneNumberIsVisible = false;
+        require(
+            !getPhoneNumber(phoneAdvert).has_value(),
+            "a hidden phone number must never be requested"
+        );
 
         const size_t removedCount = removeGroupedQueries(
             subscriptions,
@@ -152,7 +170,8 @@ namespace {
         advert.date = 0;
         advert.price = 2500;
         advert.sellerName = u8"Продавец";
-        advert.phoneNumberIsVisible = false;
+        advert.phoneNumberIsVisible = true;
+        advert.phoneNumber = "+375 29 123-45-67";
         advert.link = "https://example.test/ad";
 
         const string advertCard = formatAdvertCard(advert);
@@ -169,8 +188,16 @@ namespace {
             "advert card must not include the verbose query label"
         );
         require(
-            advertCard.find("https://example.test/ad</a>") != string::npos,
-            "advert card must show the full Kufar link"
+            advertCard.find(u8"📞 <code>+375 29 123-45-67</code>") != string::npos,
+            "advert card must show the available phone number"
+        );
+        require(
+            advertCard.find(u8"🔗 https://example.test/ad") != string::npos,
+            "advert card must show the full plain Kufar link"
+        );
+        require(
+            advertCard.find("<a href=") == string::npos,
+            "advert card must not hide the Kufar URL behind an HTML link"
         );
 
         advert.price = 0;

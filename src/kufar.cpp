@@ -20,6 +20,8 @@ namespace Kufar {
     using nlohmann::json;
 
     const string baseURL = "https://searchapi.kufar.by/v1/search/rendered-paginated?";
+    const string mobilePhoneURL = "https://api.kufar.by/search-api/v1/ads/";
+    const string currentPhoneURL = "https://api.kufar.by/search-api/v2/item/";
     const string DEFAULT_MAX_PRICE = "1000000000";
 
     optional<string> PriceRange::joinPrice() const {
@@ -150,6 +152,16 @@ namespace Kufar {
                 addURLParameter(ostream, parameter, to_string(value.value()), encodeValue);
             }
         }
+
+        optional<string> parsePhoneNumber(const string &rawJSON) {
+            const json response = json::parse(rawJSON);
+            if (!response.contains("phone") || !response.at("phone").is_string()) {
+                return nullopt;
+            }
+
+            const string phoneNumber = response.at("phone").get<string>();
+            return phoneNumber.empty() ? nullopt : optional<string>(phoneNumber);
+        }
     
     }
 
@@ -198,6 +210,12 @@ namespace Kufar {
             advert.date = timestampShift(zuluToTimestamp((string)ad.at("list_time")), 3);
             advert.price = stoi((string)ad.at("price_byn"));
             advert.phoneNumberIsVisible = !ad.at("phone_hidden");
+            if (ad.contains("phone") && ad.at("phone").is_string()) {
+                const string phoneNumber = ad.at("phone").get<string>();
+                if (!phoneNumber.empty()) {
+                    advert.phoneNumber = phoneNumber;
+                }
+            }
             advert.isDemand = containsDemandCategory(ad);
             advert.link = ad.at("ad_link");
             
@@ -218,6 +236,50 @@ namespace Kufar {
         }
         
         return adverts;
+    }
+
+    optional<string> getPhoneNumber(
+        const Ad &advert,
+        const optional<string> &bearerToken
+    ) {
+        if (!advert.phoneNumberIsVisible) {
+            return nullopt;
+        }
+        if (advert.phoneNumber.has_value() && !advert.phoneNumber->empty()) {
+            return advert.phoneNumber;
+        }
+
+        if (bearerToken.has_value() && !bearerToken->empty()) {
+            try {
+                const optional<string> phoneNumber = parsePhoneNumber(
+                    getJSONFromURL(
+                        currentPhoneURL + to_string(advert.id) + "/phone",
+                        {
+                            "Authorization: Bearer " + bearerToken.value(),
+                            "Origin: https://www.kufar.by",
+                            "Referer: " + advert.link
+                        }
+                    )
+                );
+                if (phoneNumber.has_value()) {
+                    return phoneNumber;
+                }
+            } catch (const exception &) {
+                // Fall back to the mobile endpoint below.
+            }
+        }
+
+        return parsePhoneNumber(
+            getJSONFromURL(
+                mobilePhoneURL + to_string(advert.id) + "/phone",
+                {
+                    "User-Agent: Kufar/v3.0.1/13/Android",
+                    "X-App-Name: Android Kufar",
+                    "X-App-Version: v3.0.1",
+                    "X-Device-ID: d34ef48d-e772-4f50-9536-60d5cfbfbc1c"
+                }
+            )
+        );
     }
 
     namespace EnumString {

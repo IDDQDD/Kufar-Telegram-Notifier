@@ -61,7 +61,7 @@ namespace Networking {
         return tempVariable;
     }
 
-    string getJSONFromURL(const string &url) {
+    string getJSONFromURL(const string &url, const std::vector<string> &requestHeaders) {
         // URLs may contain the Telegram bot token, so never print them.
         DEBUG_MSG("[HTTP GET]");
 
@@ -71,8 +71,15 @@ namespace Networking {
             throw std::runtime_error("Unable to create HTTP client");
         }
         string responseString;
+        struct curl_slist *headers = nullptr;
+        for (const string &header : requestHeaders) {
+            headers = curl_slist_append(headers, header.c_str());
+        }
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        if (headers != nullptr) {
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        }
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
@@ -84,9 +91,14 @@ namespace Networking {
         const CURLcode result = curl_easy_perform(curl);
         long httpStatus = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+        curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
         validateRequestResult(result, httpStatus);
         return responseString;
+    }
+
+    string getJSONFromURL(const string &url) {
+        return getJSONFromURL(url, {});
     }
 
     string postJSONToURL(const string &url, const string &body) {

@@ -501,6 +501,7 @@ namespace Kufar {
         int price;
         std::string sellerName;
         bool phoneNumberIsVisible;
+        std::optional<std::string> phoneNumber;
         bool isDemand = false;
         std::string link;
         std::vector<std::string> images;
@@ -551,6 +552,10 @@ namespace Kufar {
     };
     
     std::vector<Ad> getAds(const KufarConfiguration &);
+    std::optional<std::string> getPhoneNumber(
+        const Ad &,
+        const std::optional<std::string> &bearerToken = std::nullopt
+    );
 
     namespace EnumString {
         std::string sortType(SortType);

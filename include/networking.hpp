@@ -8,9 +8,13 @@
 #ifndef networking_hpp
 #define networking_hpp
 
+#include <string>
+#include <vector>
+
 namespace Networking {
     std::string urlEncode(const std::string &);
     std::string getJSONFromURL(const std::string &);
+    std::string getJSONFromURL(const std::string &, const std::vector<std::string> &);
     std::string postJSONToURL(const std::string &, const std::string &);
 };
 

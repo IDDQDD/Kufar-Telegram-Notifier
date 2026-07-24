@@ -110,6 +110,7 @@ struct ProgramConfiguration {
     vector<QuerySubscription> subscriptions;
     TelegramConfiguration telegramConfiguration;
     Files files;
+    optional<string> kufarBearerToken;
     
     int queryDelaySeconds = 5;
     int loopDelaySeconds = 30;
@@ -463,11 +464,7 @@ vector<QueryDisplayGroup> groupQueries(const vector<QuerySubscription> &subscrip
 }
 
 string deleteButtonText(const size_t index, const QueryDisplayGroup &group) {
-    string label = u8"🗑 " + to_string(index + 1) + ". " + group.tag;
-    if (group.searchCount > 1) {
-        label += u8" (" + to_string(group.searchCount) + u8" поиска)";
-    }
-    return label;
+    return u8"🗑 " + to_string(index + 1) + ". " + group.tag;
 }
 
 size_t removeGroupedQueries(
@@ -675,6 +672,12 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
 
         if (const char *loopDelay = getenv("KUFAR_LOOP_DELAY_SECONDS")) {
             programConfiguration.loopDelaySeconds = stoi(loopDelay);
+        }
+    }
+    if (const char *bearerToken = getenv("KUFAR_BEARER_TOKEN")) {
+        const string token = bearerToken;
+        if (!token.empty()) {
+            programConfiguration.kufarBearerToken = token;
         }
     }
 }
@@ -1285,8 +1288,7 @@ int main(int argc, char **argv) {
                     menuState.step = MenuStep::waitingForDeleteConfirmation;
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
-                        u8"Точно удалить запрос «" + selected.tag + u8"» во всех категориях?\n\n"
-                        u8"Будет удалено поисков: " + to_string(selected.searchCount),
+                        u8"Точно удалить запрос «" + selected.tag + u8"» во всех категориях?",
                         {{u8"✅ Да, удалить"}, {u8"↩️ Отмена"}}
                     );
                     continue;
@@ -1380,7 +1382,7 @@ int main(int argc, char **argv) {
             ) != recipientCache.initializedQueries.end();
             
             try {
-                for (const auto &advert : getAds(requestConfiguration)) {
+                for (auto advert : getAds(requestConfiguration)) {
                     if (advert.isDemand) {
                         filteredDemandCount += 1;
                         continue;
@@ -1409,6 +1411,17 @@ int main(int argc, char **argv) {
                             cout << "[New]: Adding [Chat ID: " << subscription.chatID << "], [Title: " << advert.title << "], [ID: " << advert.id << "], [Tag: " << advert.tag << "], [Link: " << advert.link << "]" << endl;
 
                             try {
+                                if (advert.phoneNumberIsVisible && !advert.phoneNumber.has_value()) {
+                                    try {
+                                        advert.phoneNumber = getPhoneNumber(
+                                            advert,
+                                            programConfiguration.kufarBearerToken
+                                        );
+                                    } catch (const exception &) {
+                                        cerr << "[PHONE]: Open number is unavailable for advert "
+                                             << advert.id << endl;
+                                    }
+                                }
                                 TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                                 telegramConfiguration.chatID = subscription.chatID;
                                 sendAdvert(telegramConfiguration, advert);
