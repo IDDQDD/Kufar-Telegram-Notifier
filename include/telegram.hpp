@@ -41,6 +41,7 @@ namespace Telegram {
     std::optional<int64_t> getLatestChatID(const std::string &);
     std::vector<TelegramUpdate> getUpdates(const std::string &, int64_t);
     void sendTextMessage(const TelegramConfiguration &, const std::string &);
+    void sendJSONDocument(const TelegramConfiguration &, const std::string &, const std::string &, const std::string &);
     void sendTextMessageWithKeyboard(
         const TelegramConfiguration &,
         const std::string &,

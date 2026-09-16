@@ -631,6 +631,21 @@ void updateQueryOverride(
     queryOverrides[to_string(chatID)] = queries;
 }
 
+json makeBackupConfiguration(const ProgramConfiguration &configuration) {
+    json recipients = json::array();
+    for (const auto id : configuration.access.users()) {
+        json queries = json::array();
+        for (const auto &subscription : configuration.subscriptions) {
+            if (subscription.chatID == id) queries.push_back(subscription.sourceQuery);
+        }
+        recipients.push_back({{"chat-id", id}, {"queries", queries}});
+    }
+    // Construct from an allowlist: never copy tokens or arbitrary environment variables.
+    return {{"telegram", {{"bot-token", ""}, {"chat-id", configuration.access.owner}}},
+            {"queries", json::array()}, {"recipients", recipients},
+            {"delays", {{"query", configuration.queryDelaySeconds}, {"loop", configuration.loopDelaySeconds}}}};
+}
+
 void loadJSONConfigurationData(const json &data, ProgramConfiguration &programConfiguration) {
     {
         json telegramData = data.at("telegram");
@@ -904,6 +919,8 @@ int main(int argc, char **argv) {
         };
     }
 
+    string completedBackupRequest = programConfiguration.files.cache.contents.is_object()
+        ? programConfiguration.files.cache.contents.value("completed-backup-request", string{}) : string{};
     const auto saveCache = [&]() {
         Lifecycle::prune(recipientCaches, time(nullptr), programConfiguration.cacheRetentionDays,
             programConfiguration.cacheMaxPerUser, programConfiguration.cacheMaxTotal);
@@ -923,6 +940,7 @@ int main(int argc, char **argv) {
             {"recipients", recipientsCache},
             {"telegram-update-offset", telegramUpdateOffset},
             {"user-access", access.save()},
+            {"completed-backup-request", completedBackupRequest},
             {"query-overrides", queryOverrides}
         };
         saveFile(programConfiguration.files.cache.path, cacheData.dump());
@@ -934,6 +952,29 @@ int main(int argc, char **argv) {
         recipientCaches[chatID];
     }
     saveCache();
+
+    const auto sendOwnerBackup = [&]() {
+        saveCache();
+        TelegramConfiguration ownerConfiguration = programConfiguration.telegramConfiguration;
+        ownerConfiguration.chatID = access.owner;
+        sendJSONDocument(ownerConfiguration, "kufar-configuration.json", makeBackupConfiguration(programConfiguration).dump(2),
+            u8"Поиски всех пользователей. Токена здесь нет. На новом сервере замените этим файлом kufar-configuration.json; токен укажите в .env.");
+        sendJSONDocument(ownerConfiguration, "cached-data.json", getTextFromFile(programConfiguration.files.cache.path),
+            u8"История объявлений, цен и настроек. Сохраните как data/cached-data.json до первого запуска. Не публикуйте файлы в GitHub.");
+        cout << "[BACKUP]: Configuration and cache delivered to owner " << access.owner << endl;
+    };
+    // Optional one-shot export requested by the server operator; acknowledgement survives restarts.
+    if (const char *request = getenv("KUFAR_BACKUP_REQUEST")) {
+        if (*request && completedBackupRequest != request) {
+            try {
+                sendOwnerBackup();
+                completedBackupRequest = request;
+                saveCache();
+            } catch (const exception &exc) {
+                cerr << "[ERROR (backup)]: " << exc.what() << endl;
+            }
+        }
+    }
 
     const auto pollBotCommands = [&]() {
         try {
@@ -983,6 +1024,18 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                if (isTelegramCommand(text, "/backup") || text == u8"💾 Резервная копия") {
+                    if (!isOwner) { sendMainMenu(u8"Резервные копии доступны только владельцу."); continue; }
+                    menuState = MenuState{};
+                    try {
+                        sendOwnerBackup();
+                        sendMainMenu(u8"✅ Оба файла отправлены. Скачайте их и храните вместе. Перед переносом остановите старую копию бота.");
+                    } catch (const exception &) {
+                        sendMainMenu(u8"Не удалось отправить оба файла. Повторите /backup позже; нужна полная пара файлов.");
+                    }
+                    continue;
+                }
+
                 if (isTelegramCommand(text, "/users") || text == u8"👥 Пользователи") {
                     if (!isOwner) { sendMainMenu(u8"Управление пользователями доступно только владельцу."); continue; }
                     menuState = MenuState{};
@@ -992,7 +1045,7 @@ int main(int argc, char **argv) {
                     }
                     list += u8"\nНовый пользователь пишет боту /start и передаёт вам свой ID.";
                     sendTextMessageWithKeyboard(telegramConfiguration, list,
-                        {{u8"➕ Добавить пользователя"}, {u8"🚫 Отключить пользователя"}, {u8"🏠 Главное меню"}});
+                        {{u8"➕ Добавить пользователя"}, {u8"🚫 Отключить пользователя"}, {u8"💾 Резервная копия"}, {u8"🏠 Главное меню"}});
                     continue;
                 }
                 if (text == u8"➕ Добавить пользователя" || text == u8"🚫 Отключить пользователя") {

@@ -230,6 +230,26 @@ namespace {
 }
 
 int main() {
+    {
+        ProgramConfiguration configuration;
+        configuration.telegramConfiguration = {"secret-must-not-leak", 123};
+        configuration.kufarBearerToken = "other-secret-must-not-leak";
+        configuration.access.owner = 123;
+        configuration.access.initial = {123, 456, 789};
+        configuration.access.change(123, 789, false);
+        configuration.subscriptions = {
+            makeSubscription(123, {{"tag", u8"СССР"}}),
+            makeSubscription(456, {{"tag", u8"гиря"}, {"category", 4000}})
+        };
+        const auto backup = makeBackupConfiguration(configuration);
+        require(backup.at("telegram").at("bot-token") == "", "backup must exclude bot token");
+        require(backup.dump().find("must-not-leak") == string::npos, "backup must exclude all credentials");
+        require(backup.at("recipients").size() == 2, "backup excludes disabled users");
+        require(backup.at("recipients")[1].at("queries")[0].at("category") == 4000,
+                "backup retains query filters");
+        require(backup.at("recipients")[0].at("queries")[0].at("tag") == u8"СССР",
+                "backup retains owner searches");
+    }
     testMultiwordMatching();
     testGroupedQueriesAndDeletionKeyboard();
     testAtomicCacheWrite();

@@ -185,6 +185,13 @@ namespace Telegram {
         sendTextMessageRequest(telegramConfiguration, text, nullopt, nullopt);
     }
 
+    void sendJSONDocument(const TelegramConfiguration &configuration, const string &filename,
+                          const string &body, const string &caption) {
+        if (body.size() > 45 * 1024 * 1024) throw runtime_error("Backup exceeds Telegram document size limit");
+        parseTelegramResponse(postDocumentToURL("https://api.telegram.org/bot" + configuration.botToken +
+            "/sendDocument", configuration.chatID, filename, body, caption));
+    }
+
     void sendTextMessageWithKeyboard(
         const TelegramConfiguration &telegramConfiguration,
         const string &text,

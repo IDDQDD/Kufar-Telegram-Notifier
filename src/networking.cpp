@@ -7,6 +7,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <memory>
 #include <curl/curl.h>
 #include "networking.hpp"
 #include "helperfunctions.hpp"
@@ -99,6 +100,40 @@ namespace Networking {
 
     string getJSONFromURL(const string &url) {
         return getJSONFromURL(url, {});
+    }
+
+    string postDocumentToURL(const string &url, int64_t chatID, const string &filename,
+                             const string &body, const string &caption) {
+        ensureCurlInitialized();
+        std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+        if (!curl) throw std::runtime_error("Unable to create HTTP client");
+        std::unique_ptr<curl_mime, decltype(&curl_mime_free)> mime(curl_mime_init(curl.get()), curl_mime_free);
+        if (!mime) throw std::runtime_error("Unable to create document upload");
+        const auto addField = [&](const char *name, const string &value) {
+            auto *part = curl_mime_addpart(mime.get());
+            if (!part || curl_mime_name(part, name) != CURLE_OK ||
+                curl_mime_data(part, value.data(), value.size()) != CURLE_OK)
+                throw std::runtime_error("Unable to prepare document field");
+            return part;
+        };
+        addField("chat_id", std::to_string(chatID));
+        addField("caption", caption);
+        auto *document = addField("document", body);
+        if (curl_mime_filename(document, filename.c_str()) != CURLE_OK ||
+            curl_mime_type(document, "application/json") != CURLE_OK)
+            throw std::runtime_error("Unable to prepare document metadata");
+        string response;
+        curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl.get(), CURLOPT_MIMEPOST, mime.get());
+        curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 60L);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, writeFunction);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
+        const CURLcode result = curl_easy_perform(curl.get());
+        long status = 0;
+        curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+        validateRequestResult(result, status);
+        return response;
     }
 
     string postJSONToURL(const string &url, const string &body) {
