@@ -26,6 +26,7 @@
 #include "telegram.hpp"
 #include "networking.hpp"
 #include "helperfunctions.hpp"
+#include "lifecycle.hpp"
 
 using namespace std;
 using namespace Kufar;
@@ -34,6 +35,8 @@ using nlohmann::json;
 
 const string CACHE_FILE_NAME = "cached-data.json";
 const string CONFIGURATION_FILE_NAME = "kufar-configuration.json";
+volatile sig_atomic_t stopping = 0;
+void requestStop(int) { stopping = 1; }
 
 struct ConfigurationFile {
     string path;
@@ -64,7 +67,10 @@ enum class MenuStep {
     waitingForQuery,
     waitingForCategory,
     waitingForDelete,
-    waitingForDeleteConfirmation
+    waitingForDeleteConfirmation,
+    waitingForUserAdd,
+    waitingForUserRemove,
+    waitingForUserRemoveConfirmation
 };
 
 enum class CategoryMenuPage {
@@ -82,6 +88,7 @@ struct CategoryChoice {
 };
 
 struct MenuState {
+    int64_t pendingUserID = 0;
     MenuStep step = MenuStep::idle;
     string pendingTag;
     string pendingDeleteQuery;
@@ -99,14 +106,13 @@ struct QueryDisplayGroup {
     size_t privateSellerSearchCount = 0;
 };
 
-struct RecipientCache {
-    vector<int> viewedAds;
-    vector<string> initializedQueries;
-    map<string, int> adPrices;
-    map<string, int> adLowestPrices;
-};
+using RecipientCache = Lifecycle::RecipientCache;
 
 struct ProgramConfiguration {
+    Lifecycle::Access access;
+    int cacheRetentionDays = 180;
+    int cacheMaxPerUser = 20000;
+    int cacheMaxTotal = 100000;
     vector<QuerySubscription> subscriptions;
     TelegramConfiguration telegramConfiguration;
     Files files;
@@ -487,12 +493,14 @@ size_t removeGroupedQueries(
     return previousCount - subscriptions.size();
 }
 
-vector<vector<string>> mainMenuKeyboard() {
-    return {
+vector<vector<string>> mainMenuKeyboard(const bool owner = false) {
+    vector<vector<string>> buttons = {
         {u8"🔎 Мои запросы"},
         {u8"➕ Новый запрос", u8"🗑 Удалить"},
         {u8"📊 Состояние", u8"❓ Как пользоваться"}
     };
+    if (owner) buttons.push_back({u8"👥 Пользователи"});
+    return buttons;
 }
 
 bool sameCategory(const CategoryChoice &left, const CategoryChoice &right) {
@@ -636,6 +644,11 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
         if (const char *chatID = getenv("TELEGRAM_CHAT_ID")) {
             programConfiguration.telegramConfiguration.chatID = stoll(chatID);
         }
+        const char *adminID = getenv("TELEGRAM_ADMIN_ID");
+        const auto owner = Lifecycle::parseUserID(adminID ? string(adminID) :
+            to_string(programConfiguration.telegramConfiguration.chatID));
+        if (!owner) throw runtime_error("TELEGRAM_ADMIN_ID must be a positive private Telegram user ID");
+        programConfiguration.access.owner = *owner;
     }
     {
         json queriesData = data.at("queries");
@@ -645,13 +658,15 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
         }
         
         const auto addSubscriptions = [&](const int64_t chatID, const json &recipientQueries) {
+            programConfiguration.access.initial.insert(chatID);
             for (const json &query : recipientQueries) {
                 programConfiguration.subscriptions.push_back(makeSubscription(chatID, query));
             }
         };
 
-        if (const char *recipientsJSON = getenv("KUFAR_RECIPIENTS_JSON")) {
-            const json recipients = json::parse(recipientsJSON);
+        const char *recipientsJSON = getenv("KUFAR_RECIPIENTS_JSON");
+        if (recipientsJSON || data.contains("recipients")) {
+            const json recipients = recipientsJSON ? json::parse(recipientsJSON) : data.at("recipients");
             for (const json &recipient : recipients) {
                 addSubscriptions(recipient.at("chat-id").get<int64_t>(), recipient.at("queries"));
             }
@@ -680,6 +695,16 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
             programConfiguration.kufarBearerToken = token;
         }
     }
+    const auto boundedSetting = [](const char *key, int fallback, int maximum) {
+        const char *value = getenv(key);
+        if (!value) return fallback;
+        auto parsed = Lifecycle::parseUserID(value);
+        if (!parsed || *parsed > maximum) throw runtime_error(string("Invalid setting: ") + key);
+        return static_cast<int>(*parsed);
+    };
+    programConfiguration.cacheRetentionDays = boundedSetting("KUFAR_CACHE_RETENTION_DAYS", 180, 3650);
+    programConfiguration.cacheMaxPerUser = boundedSetting("KUFAR_CACHE_MAX_PER_USER", 20000, 100000);
+    programConfiguration.cacheMaxTotal = boundedSetting("KUFAR_CACHE_MAX_TOTAL", 100000, 100000);
 }
 
 void printJSONConfigurationData(const ProgramConfiguration &programConfiguration) {
@@ -698,7 +723,7 @@ void printJSONConfigurationData(const ProgramConfiguration &programConfiguration
     }
 }
 
-json getJSONDataFromPath(const string &JSONFilePath) {
+json getJSONDataFromPath(const string &JSONFilePath, uint64_t maxBytes = 4000000) {
     cout << "[Загрузка файла]: " << '"' << JSONFilePath << '"' << endl;
 
     if (!fileExists(JSONFilePath)){
@@ -706,8 +731,8 @@ json getJSONDataFromPath(const string &JSONFilePath) {
         exit(1);
     }
     
-    if (getFileSize(JSONFilePath) > 4000000) {
-        cout << "[ОШИБКА]: Размер файла превышает 4МБ." << endl;
+    if (getFileSize(JSONFilePath) > maxBytes) {
+        cout << "[ОШИБКА]: Размер файла превышает допустимый предел: " << maxBytes << endl;
         exit(1);
     }
         
@@ -788,28 +813,32 @@ Files getFiles(const int &argsCount, char **args) {
         saveFile(files.cache.path, "[]");
     }
 
-    files.cache.contents = getJSONDataFromPath(files.cache.path);
+    files.cache.contents = getJSONDataFromPath(files.cache.path, 64 * 1024 * 1024);
     
     return files;
 }
 
 int main(int argc, char **argv) {
+    signal(SIGTERM, requestStop);
+    signal(SIGINT, requestStop);
     ProgramConfiguration programConfiguration;
     map<int64_t, RecipientCache> recipientCaches;
     
     programConfiguration.files = getFiles(argc, argv);
     loadJSONConfigurationData(programConfiguration.files.configuration.contents, programConfiguration);
 
-    set<int64_t> authorizedChatIDs;
-    for (const QuerySubscription &subscription : programConfiguration.subscriptions) {
-        authorizedChatIDs.insert(subscription.chatID);
-    }
+    Lifecycle::Access &access = programConfiguration.access;
 
     json queryOverrides = json::object();
     if (programConfiguration.files.cache.contents.is_object()) {
         queryOverrides = programConfiguration.files.cache.contents.value("query-overrides", json::object());
+        access.load(programConfiguration.files.cache.contents.value("user-access", json::object()));
     }
     applyQueryOverrides(programConfiguration, queryOverrides);
+    programConfiguration.subscriptions.erase(remove_if(programConfiguration.subscriptions.begin(),
+        programConfiguration.subscriptions.end(), [&](const QuerySubscription &s) {
+            return !access.allows(s.chatID);
+        }), programConfiguration.subscriptions.end());
 
     if (programConfiguration.telegramConfiguration.botToken.empty() ||
         programConfiguration.telegramConfiguration.botToken == "1111111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
@@ -858,41 +887,42 @@ int main(int argc, char **argv) {
             const json &recipientsCache = programConfiguration.files.cache.contents.at("recipients");
             for (auto item = recipientsCache.begin(); item != recipientsCache.end(); ++item) {
                 const int64_t chatID = stoll(item.key());
-                const map<string, int> adPrices =
-                    item.value().value("ad-prices", map<string, int>{});
-                recipientCaches[chatID] = {
-                    item.value().value("viewed-ads", vector<int>{}),
-                    item.value().value("initialized-queries", vector<string>{}),
-                    adPrices,
-                    item.value().value("ad-lowest-prices", adPrices)
-                };
+                if (access.allows(chatID)) recipientCaches[chatID] = Lifecycle::readCache(item.value(), time(nullptr));
             }
         }
     }
 
     // Preserve the existing recipient's cache when upgrading from the single-recipient format.
-    if (recipientCaches.find(programConfiguration.telegramConfiguration.chatID) == recipientCaches.end()) {
+    if (access.allows(programConfiguration.telegramConfiguration.chatID) &&
+        recipientCaches.find(programConfiguration.telegramConfiguration.chatID) == recipientCaches.end()) {
         recipientCaches[programConfiguration.telegramConfiguration.chatID] = {
             legacyViewedAds,
             legacyInitializedQueries,
             legacyAdPrices,
-            legacyAdLowestPrices
+            legacyAdLowestPrices,
+            {}
         };
     }
 
     const auto saveCache = [&]() {
+        Lifecycle::prune(recipientCaches, time(nullptr), programConfiguration.cacheRetentionDays,
+            programConfiguration.cacheMaxPerUser, programConfiguration.cacheMaxTotal);
         json recipientsCache = json::object();
-        for (const auto &[chatID, recipientCache] : recipientCaches) {
-            recipientsCache[to_string(chatID)] = {
-                {"viewed-ads", recipientCache.viewedAds},
-                {"initialized-queries", recipientCache.initializedQueries},
-                {"ad-prices", recipientCache.adPrices},
-                {"ad-lowest-prices", recipientCache.adLowestPrices}
-            };
+        for (auto &[chatID, recipientCache] : recipientCaches) {
+            set<string> activeKeys;
+            for (const auto &s : programConfiguration.subscriptions) {
+                if (s.chatID == chatID) activeKeys.insert(s.cacheKey);
+            }
+            auto &keys = recipientCache.initializedQueries;
+            keys.erase(remove_if(keys.begin(), keys.end(), [&](const string &key) {
+                return !activeKeys.count(key);
+            }), keys.end());
+            recipientsCache[to_string(chatID)] = Lifecycle::writeCache(recipientCache);
         }
         json cacheData = {
             {"recipients", recipientsCache},
             {"telegram-update-offset", telegramUpdateOffset},
+            {"user-access", access.save()},
             {"query-overrides", queryOverrides}
         };
         saveFile(programConfiguration.files.cache.path, cacheData.dump());
@@ -900,9 +930,10 @@ int main(int argc, char **argv) {
 
     map<int64_t, time_t> lastSuccessfulCheckByChat;
     map<int64_t, MenuState> menuStates;
-    for (const int64_t chatID : authorizedChatIDs) {
+    for (const int64_t chatID : access.users()) {
         recipientCaches[chatID];
     }
+    saveCache();
 
     const auto pollBotCommands = [&]() {
         try {
@@ -918,17 +949,25 @@ int main(int argc, char **argv) {
                     offsetChanged = true;
                 }
 
-                if (authorizedChatIDs.find(update.chatID) == authorizedChatIDs.end()) {
+                if (!update.privateChat || update.senderID != update.chatID || update.chatID <= 0) {
                     continue;
                 }
 
                 TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                 telegramConfiguration.chatID = update.chatID;
-                MenuState &menuState = menuStates[update.chatID];
                 const string text = trimText(update.text);
+                if (isTelegramCommand(text, "/id") ||
+                    (!access.allows(update.chatID) && isTelegramCommand(text, "/start"))) {
+                    sendTextMessage(telegramConfiguration, u8"🪪 Ваш Telegram ID: " + to_string(update.chatID) +
+                        u8"\nПередайте его владельцу бота для подключения. После подключения отправьте /menu.");
+                    continue;
+                }
+                if (!access.allows(update.chatID)) continue;
+                const bool isOwner = update.chatID == access.owner;
+                MenuState &menuState = menuStates[update.chatID];
 
                 const auto sendMainMenu = [&](const string &message) {
-                    sendTextMessageWithKeyboard(telegramConfiguration, message, mainMenuKeyboard());
+                    sendTextMessageWithKeyboard(telegramConfiguration, message, mainMenuKeyboard(isOwner));
                 };
 
                 if (isTelegramCommand(text, "/start") ||
@@ -941,6 +980,74 @@ int main(int argc, char **argv) {
                         u8"Что хотите сделать?\n"
                         u8"Выберите кнопку — бот подскажет следующий шаг."
                     );
+                    continue;
+                }
+
+                if (isTelegramCommand(text, "/users") || text == u8"👥 Пользователи") {
+                    if (!isOwner) { sendMainMenu(u8"Управление пользователями доступно только владельцу."); continue; }
+                    menuState = MenuState{};
+                    string list = u8"👥 Пользователи\n\n";
+                    for (const auto id : access.users()) {
+                        list += to_string(id) + (id == access.owner ? u8" · владелец" : "") + "\n";
+                    }
+                    list += u8"\nНовый пользователь пишет боту /start и передаёт вам свой ID.";
+                    sendTextMessageWithKeyboard(telegramConfiguration, list,
+                        {{u8"➕ Добавить пользователя"}, {u8"🚫 Отключить пользователя"}, {u8"🏠 Главное меню"}});
+                    continue;
+                }
+                if (text == u8"➕ Добавить пользователя" || text == u8"🚫 Отключить пользователя") {
+                    if (!isOwner) { sendMainMenu(u8"Это действие доступно только владельцу."); continue; }
+                    menuState = MenuState{};
+                    menuState.step = text == u8"➕ Добавить пользователя" ? MenuStep::waitingForUserAdd : MenuStep::waitingForUserRemove;
+                    sendTextMessageWithKeyboard(telegramConfiguration,
+                        u8"🪪 Отправьте числовой Telegram ID пользователя. Его можно узнать командой /id у этого бота.",
+                        {{u8"↩️ Отмена"}});
+                    continue;
+                }
+                if (isOwner && (menuState.step == MenuStep::waitingForUserAdd || menuState.step == MenuStep::waitingForUserRemove)) {
+                    const auto target = Lifecycle::parseUserID(text);
+                    if (!target) { sendTextMessage(telegramConfiguration, u8"Нужен положительный числовой ID, без @ и пробелов."); continue; }
+                    if (*target == access.owner) { sendMainMenu(u8"Владелец уже подключён, отключить себя нельзя."); menuState = MenuState{}; continue; }
+                    if (menuState.step == MenuStep::waitingForUserAdd) {
+                        if (access.allows(*target)) { sendMainMenu(u8"Пользователь уже подключён."); menuState = MenuState{}; continue; }
+                        if (access.users().size() >= 100) { sendMainMenu(u8"Достигнут лимит 100 пользователей."); menuState = MenuState{}; continue; }
+                        const auto oldAccess = access.overrides;
+                        access.change(update.chatID, *target, true);
+                        try { saveCache(); } catch (...) { access.overrides = oldAccess; throw; }
+                        menuState = MenuState{};
+                        sendMainMenu(u8"✅ Пользователь " + to_string(*target) + u8" подключён. Пусть отправит /menu и добавит свои запросы.");
+                    } else {
+                        if (!access.allows(*target)) { sendMainMenu(u8"Пользователь не подключён."); menuState = MenuState{}; continue; }
+                        menuState.pendingUserID = *target;
+                        menuState.step = MenuStep::waitingForUserRemoveConfirmation;
+                        sendTextMessageWithKeyboard(telegramConfiguration,
+                            u8"Отключить пользователя " + to_string(*target) +
+                            u8"? Его запросы и кеш будут удалены. Ваши запросы останутся на месте.",
+                            {{u8"✅ Да, отключить"}, {u8"↩️ Отмена"}});
+                    }
+                    continue;
+                }
+                if (isOwner && menuState.step == MenuStep::waitingForUserRemoveConfirmation) {
+                    if (text != u8"✅ Да, отключить") { sendTextMessage(telegramConfiguration, u8"Подтвердите кнопкой или нажмите «Отмена»."); continue; }
+                    const int64_t target = menuState.pendingUserID;
+                    const auto oldAccess = access.overrides;
+                    const auto oldQueries = programConfiguration.subscriptions;
+                    const auto oldOverrides = queryOverrides;
+                    const auto oldCaches = recipientCaches;
+                    if (!access.change(update.chatID, target, false)) continue;
+                    auto &queries = programConfiguration.subscriptions;
+                    queries.erase(remove_if(queries.begin(), queries.end(), [&](const QuerySubscription &s) { return s.chatID == target; }), queries.end());
+                    // Empty override prevents environment-based searches from returning after a restart.
+                    queryOverrides[to_string(target)] = json::array();
+                    recipientCaches.erase(target);
+                    try { saveCache(); } catch (...) {
+                        access.overrides = oldAccess; queries = oldQueries;
+                        queryOverrides = oldOverrides; recipientCaches = oldCaches; throw;
+                    }
+                    menuStates.erase(target);
+                    lastSuccessfulCheckByChat.erase(target);
+                    menuState = MenuState{};
+                    sendMainMenu(u8"✅ Пользователь " + to_string(target) + u8" отключён. Запросы и кеш удалены.");
                     continue;
                 }
 
@@ -968,7 +1075,7 @@ int main(int argc, char **argv) {
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
                         formatQueryList(subscriptionsForChat(programConfiguration, update.chatID)),
-                        mainMenuKeyboard()
+                        mainMenuKeyboard(isOwner)
                     );
                     continue;
                 }
@@ -977,6 +1084,10 @@ int main(int argc, char **argv) {
                     text == u8"➕ Добавить запрос" ||
                     text == u8"➕ Новый запрос" ||
                     text == u8"➕ Новый поиск") {
+                    if (subscriptionsForChat(programConfiguration, update.chatID).size() >= 200) {
+                        sendMainMenu(u8"Достигнут лимит 200 поисков по категориям. Удалите ненужные запросы.");
+                        continue;
+                    }
                     menuState = MenuState{};
                     menuState.step = MenuStep::waitingForQuery;
                     sendTextMessageWithKeyboard(
@@ -1032,7 +1143,9 @@ int main(int argc, char **argv) {
                        << recipientCaches[update.chatID].viewedAds.size() << "\n"
                        << u8"⏱ Полный цикл: примерно каждые 5 минут";
 
-                    sendTextMessageWithKeyboard(telegramConfiguration, status.str(), mainMenuKeyboard());
+                    status << u8"\n🧹 Кеш: до " << programConfiguration.cacheMaxPerUser
+                           << u8" объявлений; хранение " << programConfiguration.cacheRetentionDays << u8" дней без появления в выдаче.";
+                    sendTextMessageWithKeyboard(telegramConfiguration, status.str(), mainMenuKeyboard(isOwner));
                     cout << "[STATUS]: Replied to chat " << update.chatID << endl;
                     continue;
                 }
@@ -1170,6 +1283,11 @@ int main(int argc, char **argv) {
                     }
 
                     const string normalizedTag = normalizeTitle(menuState.pendingTag);
+                    if (subscriptionsForChat(programConfiguration, update.chatID).size() + menuState.pendingCategories.size() > 200) {
+                        sendMainMenu(u8"Слишком много поисков: максимум 200 по категориям.");
+                        menuState = MenuState{};
+                        continue;
+                    }
                     const string addedTag = menuState.pendingTag;
                     const bool addedPrivateSellersOnly = menuState.privateSellersOnly;
                     const optional<SellerType> selectedSellerType = addedPrivateSellersOnly
@@ -1350,22 +1468,24 @@ int main(int argc, char **argv) {
     };
 
     const auto sleepWithStatusPolling = [&](int seconds) {
-        while (seconds > 0) {
+        while (seconds > 0 && !stopping) {
             const int chunk = min(seconds, 5);
             sleep(chunk);
             seconds -= chunk;
-            pollBotCommands();
+            if (!stopping) pollBotCommands();
         }
     };
 
     pollBotCommands();
 
-    while (true) {
+    while (!stopping) {
         const auto cycleStartedAt = chrono::steady_clock::now();
         // Menu actions can add or remove subscriptions while a cycle is running.
         // Work on a snapshot so Telegram changes take effect safely on the next cycle.
         const vector<QuerySubscription> cycleSubscriptions = programConfiguration.subscriptions;
         for (const auto &subscription : cycleSubscriptions) {
+            if (stopping) break;
+            if (!access.allows(subscription.chatID)) continue;
             unsigned int sentCount = 0;
             unsigned int filteredDemandCount = 0;
             unsigned int filteredTitleCount = 0;
@@ -1383,6 +1503,7 @@ int main(int argc, char **argv) {
             
             try {
                 for (auto advert : getAds(requestConfiguration)) {
+                    if (stopping) break;
                     if (advert.isDemand) {
                         filteredDemandCount += 1;
                         continue;
@@ -1404,6 +1525,10 @@ int main(int argc, char **argv) {
                     }
 
                     const string advertID = to_string(advert.id);
+                    if (vectorContains(recipientCache.viewedAds, advert.id)) {
+                        recipientCache.lastSeen[advertID] = time(nullptr);
+                        cacheChanged = true;
+                    }
                     if (!vectorContains(recipientCache.viewedAds, advert.id)) {
                         bool rememberAdvert = !queryInitialized;
 
@@ -1437,6 +1562,7 @@ int main(int argc, char **argv) {
                             // Only mark a new advert as viewed after Telegram confirms delivery.
                             // Initial query priming remains silent and is stored immediately.
                             recipientCache.viewedAds.push_back(advert.id);
+                            recipientCache.lastSeen[advertID] = time(nullptr);
                             recipientCache.adPrices[advertID] = advert.price;
                             if (advert.price > 0) {
                                 recipientCache.adLowestPrices[advertID] = advert.price;
@@ -1497,7 +1623,7 @@ int main(int argc, char **argv) {
 
                 lastSuccessfulCheckByChat[subscription.chatID] = time(nullptr);
 
-                if (!queryInitialized) {
+                if (!queryInitialized && !stopping) {
                     recipientCache.initializedQueries.push_back(queryKey);
                     cacheChanged = true;
                     cout << "[CACHE]: Initial listings stored without Telegram notifications for chat " << subscription.chatID << ", query: " << queryKey << endl;
@@ -1532,7 +1658,10 @@ int main(int argc, char **argv) {
         );
         cout << "[CYCLE]: completed in " << elapsedSeconds
              << "s, next cycle in " << remainingCycleSeconds << "s" << endl;
+        saveCache();
         sleepWithStatusPolling(remainingCycleSeconds);
     }
+    saveCache();
+    cout << "[STOP]: State saved." << endl;
     return 0;
 }

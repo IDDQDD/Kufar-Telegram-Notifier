@@ -104,4 +104,9 @@ bin/
 # Local secrets and runtime data
 .env
 cached-data.json
+data/
+backups/
+build/
+.env.*
+!.env.example
 

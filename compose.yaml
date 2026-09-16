@@ -1,0 +1,29 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID in .env}
+      TELEGRAM_ADMIN_ID: ${TELEGRAM_ADMIN_ID:?Set TELEGRAM_ADMIN_ID in .env}
+      KUFAR_LOOP_DELAY_SECONDS: ${KUFAR_LOOP_DELAY_SECONDS:-300}
+      KUFAR_CACHE_PATH: /data/cached-data.json
+      KUFAR_CONFIG_PATH: /app/kufar-configuration.json
+    volumes:
+      - ./data:/data
+      - ./kufar-configuration.json:/app/kufar-configuration.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 2m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

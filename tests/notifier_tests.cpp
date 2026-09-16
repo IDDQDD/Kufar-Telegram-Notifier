@@ -160,6 +160,9 @@ namespace {
     void testVisualMenuAndMediaDelivery() {
         const vector<vector<string>> menu = mainMenuKeyboard();
         require(menu.size() == 3, "main menu must stay compact");
+        const auto ownerMenu = mainMenuKeyboard(true);
+        require(ownerMenu.size() == 4 && ownerMenu.back()[0] == u8"👥 Пользователи",
+                "owner alone sees user management button");
         require(menu[0].size() == 1, "primary search action must have its own row");
         require(menu[0][0] == u8"🔎 Мои запросы", "main menu must use the query list label");
         require(menu[1][0] == u8"➕ Новый запрос", "main menu must use the new query label");

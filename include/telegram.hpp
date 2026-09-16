@@ -34,6 +34,8 @@ namespace Telegram {
         int64_t updateID;
         int64_t chatID;
         std::string text;
+        int64_t senderID = 0;
+        bool privateChat = false;
     };
 
     std::optional<int64_t> getLatestChatID(const std::string &);

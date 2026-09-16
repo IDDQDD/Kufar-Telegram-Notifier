@@ -170,6 +170,8 @@ namespace Telegram {
                 if (message.contains("chat") && message.contains("text")) {
                     parsedUpdate.chatID = message.at("chat").at("id").get<int64_t>();
                     parsedUpdate.text = message.at("text").get<string>();
+                    parsedUpdate.privateChat = message.at("chat").value("type", string()) == "private";
+                    if (message.contains("from")) parsedUpdate.senderID = message.at("from").value("id", int64_t{0});
                 }
             }
 

@@ -28,6 +28,8 @@ target_compile_options(Kufar-Telegram-Notifier PRIVATE -Wall -Wextra -Wpedantic)
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(Lifecycle-Tests tests/lifecycle_tests.cpp)
+    add_test(NAME lifecycle-tests COMMAND Lifecycle-Tests)
     add_executable(
         Kufar-Telegram-Notifier-Tests
 
