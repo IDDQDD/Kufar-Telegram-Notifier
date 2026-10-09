@@ -8,6 +8,29 @@ void require(bool ok, const char *message) {
 
 int main() {
     try {
+        int64_t offset = 0;
+        int64_t savedOffset = 0;
+        int replies = 0;
+        int writes = 0;
+        const auto persist = [&]() { savedOffset = offset; ++writes; };
+        for (int64_t id : {10, 10, 9, 11, 11}) {
+            if (claimTelegramUpdate(id, offset, persist)) {
+                require(savedOffset == id + 1, "acceptance must be durable before replying");
+                ++replies;
+            }
+        }
+        require(replies == 2 && writes == 2, "replayed and stale updates must not reply or write twice");
+        offset = savedOffset; // A new process resumes from the persisted offset.
+        require(!claimTelegramUpdate(11, offset, persist), "restart after reply must not replay the command");
+        bool writeFailed = false;
+        try {
+            claimTelegramUpdate(12, offset, []() { throw std::runtime_error("disk full"); });
+        } catch (const std::exception &) { writeFailed = true; }
+        require(writeFailed && offset == savedOffset, "failed persistence must reject handling and roll back offset");
+        require(claimTelegramUpdate(12, offset, persist), "a command can be accepted after storage is repaired");
+        require(!claimTelegramUpdate(-1, offset, persist), "invalid update IDs rejected");
+        require(!claimTelegramUpdate(std::numeric_limits<int64_t>::max(), offset, persist), "offset must not overflow");
+
         require(parseUserID("707549545") == 707549545, "valid ID");
         for (const auto *invalid : {"", "0", "-100123", "@name", "12 34", "123x", "4503599627370496", "99999999999999999999"})
             require(!parseUserID(invalid), "invalid ID rejected");

@@ -53,6 +53,11 @@ int main() try {
     require(!parsed[1].privateChat && parsed[1].chatID == -42, "group must remain identifiable as a group");
     require(parsed[2].senderID == 0, "missing sender must not inherit chat identity");
     require(parsed[3].senderID != parsed[3].chatID, "mismatched sender must not inherit chat identity");
+    updates = R"({"ok":true,"result":[{"update_id":8},{"update_id":6},{"update_id":8},{"update_id":7}]})";
+    const auto ordered = Telegram::getUpdates("offline-test-token", 0);
+    require(ordered.size() == 4 && ordered[0].updateID == 6 && ordered[1].updateID == 7 &&
+            ordered[2].updateID == 8 && ordered[3].updateID == 8,
+            "updates must be ordered so accepting a newer ID cannot skip an earlier command");
     std::cout << "Telegram command and identity tests passed\n";
     return 0;
 } catch (const std::exception &error) {

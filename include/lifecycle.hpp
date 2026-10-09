@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <ctime>
 #include <map>
+#include <limits>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -13,6 +14,17 @@
 #include "json.hpp"
 
 namespace Lifecycle {
+// Persist acceptance before replying: repeated delivery or a restart cannot reply twice.
+template<typename Persist>
+inline bool claimTelegramUpdate(int64_t updateID, int64_t &nextOffset, Persist persist) {
+    if (updateID < 0 || updateID < nextOffset || updateID == std::numeric_limits<int64_t>::max()) return false;
+    const int64_t previousOffset = nextOffset;
+    nextOffset = updateID + 1;
+    try { persist(); }
+    catch (...) { nextOffset = previousOffset; throw; }
+    return true;
+}
+
 inline std::optional<int64_t> parseUserID(const std::string &text) {
     if (text.empty() || text.size() > 16 ||
         text.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;

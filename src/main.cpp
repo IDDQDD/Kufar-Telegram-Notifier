@@ -20,6 +20,7 @@
 #include <chrono>
 #include <codecvt>
 #include <locale>
+#include <memory>
 
 #include "json.hpp"
 #include "kufar.hpp"
@@ -28,6 +29,7 @@
 #include "helperfunctions.hpp"
 #include "lifecycle.hpp"
 #include "querygrouping.hpp"
+#include "statelock.hpp"
 
 using namespace std;
 using namespace Kufar;
@@ -47,6 +49,7 @@ struct ConfigurationFile {
 struct CacheFile {
     string path;
     json contents;
+    shared_ptr<StateLock> lock;
 };
 
 struct Files {
@@ -844,11 +847,10 @@ Files getFiles(const int &argsCount, char **args) {
     
     files.configuration.contents = getJSONDataFromPath(files.configuration.path);
 
+    const filesystem::path cachePath(files.cache.path);
+    if (cachePath.has_parent_path()) filesystem::create_directories(cachePath.parent_path());
+    files.cache.lock = make_shared<StateLock>(files.cache.path);
     if (!fileExists(files.cache.path)) {
-        const filesystem::path cachePath(files.cache.path);
-        if (cachePath.has_parent_path()) {
-            filesystem::create_directories(cachePath.parent_path());
-        }
         saveFile(files.cache.path, "[]");
     }
 
@@ -1016,13 +1018,8 @@ int main(int argc, char **argv) try {
                 programConfiguration.telegramConfiguration.botToken,
                 telegramUpdateOffset
             );
-            bool offsetChanged = false;
-
             for (const TelegramUpdate &update : updates) {
-                if (update.updateID >= telegramUpdateOffset) {
-                    telegramUpdateOffset = update.updateID + 1;
-                    offsetChanged = true;
-                }
+                if (!Lifecycle::claimTelegramUpdate(update.updateID, telegramUpdateOffset, saveCache)) continue;
 
                 if (!update.privateChat || update.senderID != update.chatID || update.chatID <= 0) {
                     continue;
@@ -1581,9 +1578,6 @@ int main(int argc, char **argv) try {
                 sendMainMenu(u8"Не понял сообщение. Выберите действие кнопкой ниже.");
             }
 
-            if (offsetChanged) {
-                saveCache();
-            }
         } catch (const StorageError &) {
             // Do not keep sending notifications after persistence has failed.
             throw;

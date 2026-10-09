@@ -104,6 +104,7 @@ bin/
 # Local secrets and runtime data
 .env
 cached-data.json
+cached-data.json.lock
 data/
 backups/
 build/

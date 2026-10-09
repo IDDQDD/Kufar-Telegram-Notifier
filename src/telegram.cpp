@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <ctime>
+#include <algorithm>
 #include "kufar.hpp"
 #include "telegram.hpp"
 #include "networking.hpp"
@@ -178,6 +179,9 @@ namespace Telegram {
             result.push_back(parsedUpdate);
         }
 
+        stable_sort(result.begin(), result.end(), [](const TelegramUpdate &left, const TelegramUpdate &right) {
+            return left.updateID < right.updateID;
+        });
         return result;
     }
 

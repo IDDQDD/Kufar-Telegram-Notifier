@@ -7,7 +7,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
     Kufar-Telegram-Notifier
-    VERSION 2.7
+    VERSION 2.8
 )
 
 include_directories(include)
@@ -28,6 +28,8 @@ target_compile_options(Kufar-Telegram-Notifier PRIVATE -Wall -Wextra -Wpedantic)
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(StateLock-Tests tests/statelock_tests.cpp)
+    add_test(NAME state-lock-tests COMMAND StateLock-Tests)
     add_executable(Query-Grouping-Tests tests/query_grouping_tests.cpp)
     add_test(NAME query-grouping-tests COMMAND Query-Grouping-Tests)
     add_executable(Kufar-Search-Tests tests/kufar_tests.cpp src/kufar.cpp src/helperfunctions.cpp)
