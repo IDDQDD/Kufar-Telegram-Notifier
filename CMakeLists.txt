@@ -28,6 +28,8 @@ target_compile_options(Kufar-Telegram-Notifier PRIVATE -Wall -Wextra -Wpedantic)
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(Query-Grouping-Tests tests/query_grouping_tests.cpp)
+    add_test(NAME query-grouping-tests COMMAND Query-Grouping-Tests)
     add_executable(Kufar-Search-Tests tests/kufar_tests.cpp src/kufar.cpp src/helperfunctions.cpp)
     add_test(NAME kufar-search-tests COMMAND Kufar-Search-Tests)
     add_executable(Telegram-Tests tests/telegram_tests.cpp src/telegram.cpp)

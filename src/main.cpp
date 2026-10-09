@@ -27,6 +27,7 @@
 #include "networking.hpp"
 #include "helperfunctions.hpp"
 #include "lifecycle.hpp"
+#include "querygrouping.hpp"
 
 using namespace std;
 using namespace Kufar;
@@ -104,6 +105,7 @@ struct QueryDisplayGroup {
     vector<string> categories;
     size_t searchCount = 0;
     size_t privateSellerSearchCount = 0;
+    vector<string> variants;
 };
 
 using RecipientCache = Lifecycle::RecipientCache;
@@ -152,6 +154,10 @@ vector<string> splitSearchTerms(const string &value) {
     }
 
     return terms;
+}
+
+string queryGroupKey(const string &value) {
+    return QueryGrouping::key(normalizeTitle(value));
 }
 
 bool matchesMultiwordQuery(const string &title, const optional<string> &queryTag) {
@@ -427,7 +433,7 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
     ostringstream text;
     text << u8"🔎 Мои запросы: " << groups.size();
     if (groups.size() != subscriptions.size()) {
-        text << u8"  •  поисков по категориям: " << subscriptions.size();
+        text << u8"  •  проверок по вариантам и категориям: " << subscriptions.size();
     }
     text << "\n\n";
 
@@ -446,6 +452,14 @@ string formatQueryList(const vector<QuerySubscription> &subscriptions) {
             text << u8" — 👥 фильтр продавца различается";
         }
         text << "\n";
+        if (group.variants.size() > 1) {
+            text << u8"   Варианты: ";
+            for (size_t variant = 0; variant < group.variants.size(); ++variant) {
+                if (variant) text << u8" / ";
+                text << group.variants[variant];
+            }
+            text << "\n";
+        }
     }
     return text.str();
 }
@@ -455,15 +469,18 @@ vector<QueryDisplayGroup> groupQueries(const vector<QuerySubscription> &subscrip
     map<string, size_t> groupIndexes;
     for (const QuerySubscription &subscription : subscriptions) {
         const string tag = subscription.query.tag.value_or(u8"Без названия");
-        const string normalizedTag = normalizeTitle(tag);
+        const string normalizedTag = queryGroupKey(tag);
         auto groupIndex = groupIndexes.find(normalizedTag);
         if (groupIndex == groupIndexes.end()) {
             groupIndexes[normalizedTag] = groups.size();
-            groups.push_back({normalizedTag, tag, {}, 0, 0});
+            groups.push_back({normalizedTag, tag, {}, 0, 0, {}});
             groupIndex = groupIndexes.find(normalizedTag);
         }
 
         QueryDisplayGroup &group = groups[groupIndex->second];
+        if (none_of(group.variants.begin(), group.variants.end(), [&](const string &variant) {
+            return normalizeTitle(variant) == normalizeTitle(tag);
+        })) group.variants.push_back(tag);
         const string subscriptionCategory = categoryName(subscription);
         if (find(group.categories.begin(), group.categories.end(), subscriptionCategory) == group.categories.end()) {
             group.categories.push_back(subscriptionCategory);
@@ -492,7 +509,7 @@ size_t removeGroupedQueries(
             subscriptions.end(),
             [&](const QuerySubscription &candidate) {
                 return candidate.chatID == chatID &&
-                       normalizeTitle(candidate.query.tag.value_or(u8"Без названия")) == normalizedTag;
+                       queryGroupKey(candidate.query.tag.value_or(u8"Без названия")) == normalizedTag;
             }
         ),
         subscriptions.end()
@@ -1197,7 +1214,7 @@ int main(int argc, char **argv) try {
                         sendTextMessageWithKeyboard(
                             telegramConfiguration,
                             u8"🗑 УДАЛЕНИЕ ПОИСКА\n\n"
-                            u8"Будут удалены все его категории. Нажмите на запрос:",
+                            u8"Будут удалены все словоформы и категории группы. Нажмите на запрос:",
                             deleteKeyboard(groups)
                         );
                     }
@@ -1225,7 +1242,8 @@ int main(int argc, char **argv) try {
                         if (!active) error = searchErrors.erase(error); else ++error;
                     }
                     status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ\n\n" : u8"⚠️ ОШИБКА ПОИСКА\n\n")
-                       << u8"🔎 Активных поисков: " << queryCount << "\n"
+                       << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
+                       << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
                        << formatElapsed(lastSuccessfulCheckByChat[update.chatID]) << "\n"
                        << u8"🗃 Объявлений в памяти: "
@@ -1510,7 +1528,7 @@ int main(int argc, char **argv) try {
                     menuState.step = MenuStep::waitingForDeleteConfirmation;
                     sendTextMessageWithKeyboard(
                         telegramConfiguration,
-                        u8"Точно удалить запрос «" + selected.tag + u8"» во всех категориях?",
+                        u8"Точно удалить группу «" + selected.tag + u8"» со всеми словоформами и категориями?",
                         {{u8"✅ Да, удалить"}, {u8"↩️ Отмена"}}
                     );
                     continue;
@@ -1531,7 +1549,7 @@ int main(int argc, char **argv) try {
                         programConfiguration.subscriptions.end(),
                         [&](const QuerySubscription &candidate) {
                             return candidate.chatID == update.chatID &&
-                                   normalizeTitle(candidate.query.tag.value_or(u8"Без названия")) ==
+                                   queryGroupKey(candidate.query.tag.value_or(u8"Без названия")) ==
                                        menuState.pendingDeleteQuery;
                         }
                     );

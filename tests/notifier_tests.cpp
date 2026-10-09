@@ -82,7 +82,7 @@ namespace {
         const size_t removedCount = removeGroupedQueries(
             subscriptions,
             chatID,
-            normalizeTitle(u8"Блок питания")
+            queryGroupKey(u8"Блок питания")
         );
         require(removedCount == 2, "group deletion must remove every category of a query");
         require(subscriptions.size() == 1, "group deletion must preserve other queries");
@@ -127,6 +127,33 @@ namespace {
         filesystem::remove(directoryTarget);
 
         filesystem::remove(testPath);
+    }
+
+    void testWordFormGrouping() {
+        vector<QuerySubscription> subscriptions = {
+            makeSubscription(123, {{"tag", u8"Книги"}, {"category", int(Category::electronics)}}),
+            makeSubscription(123, {{"tag", u8"Книга"}}),
+            makeSubscription(123, {{"tag", u8"книжека"}}),
+            makeSubscription(123, {{"tag", u8"Книжка"}}),
+            makeSubscription(123, {{"tag", u8"Книжный шкаф"}})
+        };
+        const auto saved = subscriptions;
+        const auto groups = groupQueries(subscriptions);
+        require(groups.size() == 2 && groups[0].searchCount == 4, "book variants form one display group");
+        require(groups[0].variants.size() == 4 && groups[0].categories.size() == 2,
+                "group preserves all word variants and categories");
+        require(formatQueryList(subscriptions).find(u8"Мои запросы: 2") != string::npos,
+                "display count reports groups");
+        require(deleteKeyboard(groups)[0].size() == 2, "delete menu has one button per group");
+        for (size_t i = 0; i < subscriptions.size(); ++i) {
+            require(subscriptions[i].cacheKey == saved[i].cacheKey && subscriptions[i].sourceQuery == saved[i].sourceQuery,
+                    "grouping must not modify searches or cache identities");
+        }
+        subscriptions.push_back(makeSubscription(456, {{"tag", u8"Книга"}}));
+        require(removeGroupedQueries(subscriptions, 123, queryGroupKey(u8"Книга")) == 4,
+                "group deletion removes all variants for the selected chat");
+        require(subscriptions.size() == 2 && subscriptions.back().chatID == 456,
+                "group deletion preserves other products and other recipients");
     }
 
     void testExecutableDirectoryResolution() {
@@ -283,6 +310,7 @@ int main() {
     }
     testMultiwordMatching();
     testGroupedQueriesAndDeletionKeyboard();
+    testWordFormGrouping();
     testAtomicCacheWrite();
     testExecutableDirectoryResolution();
     testCycleTiming();
