@@ -16,6 +16,7 @@ int searchFailuresRemaining = 0;
 int sendFailuresRemaining = 0;
 bool probeTest = false;
 bool probeFailure = false;
+bool overlappingSearches = false;
 void require(bool condition, const char *message) {
     if (!condition) throw runtime_error(message);
 }
@@ -49,7 +50,7 @@ string getJSONFromURL(const string &url) {
                         {"price_byn", "10000"}, {"ad_link", "https://example.test/" + to_string(id)}};
         };
         auto ads = json::array({advert(501, u8"Гиря старая")});
-        if (searchCount > 1) ads.push_back(advert(502, u8"Гиря новая"));
+        if (searchCount > 1 || overlappingSearches) ads.push_back(advert(502, u8"Гиря новая"));
         return json{{"ads", ads}}.dump();
     }
     require(url.find("/getUpdates?timeout=0&offset=" + to_string(expectedOffset)) != string::npos,
@@ -116,7 +117,7 @@ int main() try {
             "category selected once despite repeated delivery");
     require(replies[4].at("text").get<string>().find(u8"Пока ничего не выбрано") != string::npos,
             "a new click can deselect the same category");
-    require(replies.back().at("text").get<string>().find("2.9.4") != string::npos, "status identifies updated code");
+    require(replies.back().at("text").get<string>().find("2.9.5") != string::npos, "status identifies updated code");
     require(replies.back().at("text").get<string>().find(u8"ПОИСКИ НЕ НАСТРОЕНЫ") != string::npos &&
             replies.back().at("text").get<string>().find(u8"Последняя проверка: поисков нет") != string::npos,
             "an empty query list must explain that monitoring is idle");
@@ -248,6 +249,76 @@ int main() try {
     require(retryState.at("recipients").at("123").at("viewed-ads").size() == 2 &&
             retryState.at("recipients").at("123").at("initialized-queries").size() == 1,
             "successful recovery must persist baseline and confirmed delivery");
+
+    // The first query is new and silently primes ID 502. The second query was
+    // already active before 502 appeared and must still deliver it to this user.
+    statePath = (directory / "overlap-cache.json").string();
+    saveFile(statePath, json{{"recipients", {{"123", {{"viewed-ads", {501}},
+        {"initialized-queries", {"active"}}}}}}}.dump());
+    saveFile(configPath, json{{"telegram", {{"bot-token", "offline-test-token"}, {"chat-id", 123}}},
+        {"queries", {{{"tag", u8"Гиря"}, {"cache-key", "new"}},
+                     {{"tag", u8"Гиря"}, {"cache-key", "active"}}}},
+        {"delays", {{"query", 0}, {"loop", 0}}}}.dump());
+    arguments[2] = "--cache=" + statePath;
+    argv.clear();
+    for (auto &argument : arguments) argv.push_back(argument.data());
+    batches = {json::array(), json::array(), json::array({message(1, 1, "/status")})};
+    nextBatch = 0;
+    expectedOffset = 0;
+    searchCount = 0;
+    overlappingSearches = true;
+    scheduleTest = true;
+    stopping = 0;
+    replies.clear();
+    require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "overlapping search run failed");
+    scheduleTest = false;
+    advertsSent = 0;
+    for (const auto &reply : replies) if (reply.contains("parse_mode")) ++advertsSent;
+    require(searchCount == 2 && advertsSent == 1,
+            "new query's silent baseline must not suppress a new advert in an already active search");
+    require(getJSONDataFromPath(statePath).at("recipients").at("123").at("viewed-ads").size() == 2,
+            "delivering a silently primed advert must not duplicate its global ID");
+    batches = {json::array(), json::array(), json::array({message(2, 2, "/status")})};
+    nextBatch = 0;
+    expectedOffset = 2;
+    scheduleTest = true;
+    stopping = 0;
+    replies.clear();
+    require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "overlap restart failed");
+    scheduleTest = false;
+    for (const auto &reply : replies) require(!reply.contains("parse_mode"),
+            "confirmed delivery must stay suppressed in both searches after a restart");
+    overlappingSearches = false;
+
+    const auto firstCategory = makeSubscription(123, {{"tag", u8"Гиря"}, {"category", 4000}});
+    const auto secondCategory = makeSubscription(123, {{"tag", u8"Гиря"}, {"category", 5000}});
+    require(firstCategory.cacheKey != secondCategory.cacheKey,
+            "legacy config queries with the same tag must have separate category baselines");
+
+    statePath = (directory / "legacy-category-cache.json").string();
+    saveFile(statePath, json{{"recipients", {{"123", {{"viewed-ads", {501}},
+        {"initialized-queries", {u8"Гиря"}}}}}}}.dump());
+    saveFile(configPath, json{{"telegram", {{"bot-token", "offline-test-token"}, {"chat-id", 123}}},
+        {"queries", {firstCategory.sourceQuery, secondCategory.sourceQuery}},
+        {"delays", {{"query", 0}, {"loop", 0}}}}.dump());
+    arguments[2] = "--cache=" + statePath;
+    argv.clear();
+    for (auto &argument : arguments) argv.push_back(argument.data());
+    batches = {json::array(), json::array(), json::array({message(1, 1, "/status")})};
+    nextBatch = 0;
+    expectedOffset = 0;
+    searchCount = 0;
+    overlappingSearches = true;
+    scheduleTest = true;
+    stopping = 0;
+    replies.clear();
+    require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "legacy baseline migration failed");
+    scheduleTest = false;
+    overlappingSearches = false;
+    advertsSent = 0;
+    for (const auto &reply : replies) if (reply.contains("parse_mode")) ++advertsSent;
+    require(advertsSent == 1 && getJSONDataFromPath(statePath).at("recipients").at("123").at("initialized-queries").size() == 2,
+            "legacy initialized tag must migrate to distinct category keys without silently swallowing new adverts");
 
     // Independent diagnostic mode can run beside a live worker holding the state lock.
     StateLock heldLock(statePath);

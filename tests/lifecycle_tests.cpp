@@ -117,6 +117,15 @@ int main() {
         auto cache = readCache(legacy, now);
         require(cache.lastSeen.at("10") == now, "legacy IDs granted full retention");
         require(cache.adLowestPrices == cache.adPrices, "legacy price fallback retained");
+        require(handledByQuery(cache, 10, "any-search"), "legacy history must keep suppressing duplicates");
+        cache.initialOnlyAds["10"] = {"new-search"};
+        require(handledByQuery(cache, 10, "new-search") && !handledByQuery(cache, 10, "existing-search"),
+                "silently priming one query must not claim delivery for another query");
+        auto silentRoundtrip = readCache(writeCache(cache), now + 1);
+        require(silentRoundtrip.initialOnlyAds == cache.initialOnlyAds,
+                "silent baseline ownership must survive a restart");
+        silentRoundtrip.initialOnlyAds.erase("10");
+        require(handledByQuery(silentRoundtrip, 10, "existing-search"), "confirmed delivery suppresses duplicates everywhere");
         cache.adLowestPrices["10"] = 100;
         auto roundtrip = readCache(writeCache(cache), now + 100);
         require(roundtrip.adLowestPrices.at("10") == 100 && roundtrip.lastSeen.at("10") == now,
@@ -130,6 +139,7 @@ int main() {
         require(caches[1].viewedAds == std::vector<int>({11, 12}), "TTL boundary and recent ads");
         require(caches[1].adPrices.size() == 2 && caches[1].adLowestPrices.size() == 2 && caches[1].lastSeen.size() == 2,
                 "expired IDs and orphan metadata removed together");
+        require(caches[1].initialOnlyAds.empty(), "expired silent baselines must be pruned with their IDs");
         require(caches[1].initializedQueries == std::vector<std::string>({"search"}), "query priming retained");
 
         caches.clear();

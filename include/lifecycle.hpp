@@ -124,6 +124,8 @@ struct RecipientCache {
     std::map<std::string, int> adPrices;
     std::map<std::string, int> adLowestPrices;
     std::map<std::string, int64_t> lastSeen;
+    // IDs silently primed by these queries, but never confirmed as delivered.
+    std::map<std::string, std::vector<std::string>> initialOnlyAds;
 };
 
 inline RecipientCache readCache(const nlohmann::json &data, int64_t now) {
@@ -133,6 +135,7 @@ inline RecipientCache readCache(const nlohmann::json &data, int64_t now) {
     result.adPrices = data.value("ad-prices", std::map<std::string, int>{});
     result.adLowestPrices = data.value("ad-lowest-prices", result.adPrices);
     result.lastSeen = data.value("last-seen", std::map<std::string, int64_t>{});
+    result.initialOnlyAds = data.value("initial-only-ads", std::map<std::string, std::vector<std::string>>{});
     // Old caches have no dates: grant them a full retention period.
     for (int id : result.viewedAds) result.lastSeen.emplace(std::to_string(id), now);
     return result;
@@ -141,7 +144,7 @@ inline RecipientCache readCache(const nlohmann::json &data, int64_t now) {
 inline nlohmann::json writeCache(const RecipientCache &cache) {
     return {{"viewed-ads", cache.viewedAds}, {"initialized-queries", cache.initializedQueries},
             {"ad-prices", cache.adPrices}, {"ad-lowest-prices", cache.adLowestPrices},
-            {"last-seen", cache.lastSeen}};
+            {"last-seen", cache.lastSeen}, {"initial-only-ads", cache.initialOnlyAds}};
 }
 
 inline void retain(RecipientCache &cache, const std::set<int> &keep) {
@@ -156,6 +159,15 @@ inline void retain(RecipientCache &cache, const std::set<int> &keep) {
     clean(cache.adPrices);
     clean(cache.adLowestPrices);
     clean(cache.lastSeen);
+    clean(cache.initialOnlyAds);
+}
+
+inline bool handledByQuery(const RecipientCache &cache, int id, const std::string &queryKey) {
+    if (std::find(cache.viewedAds.begin(), cache.viewedAds.end(), id) == cache.viewedAds.end()) return false;
+    const auto primed = cache.initialOnlyAds.find(std::to_string(id));
+    // Legacy history has no distinction; preserve its existing duplicate suppression.
+    return primed == cache.initialOnlyAds.end() ||
+        std::find(primed->second.begin(), primed->second.end(), queryKey) != primed->second.end();
 }
 
 inline void prune(std::map<int64_t, RecipientCache> &caches, int64_t now,

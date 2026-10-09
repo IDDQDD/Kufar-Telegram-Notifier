@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim AS build
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential cmake libcurl4-openssl-dev \
+    && apt-get install -y --no-install-recommends build-essential cmake libcurl4-openssl-dev python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

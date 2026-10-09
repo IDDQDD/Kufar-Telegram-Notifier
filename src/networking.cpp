@@ -8,9 +8,11 @@
 #include <iostream>
 #include <stdexcept>
 #include <memory>
+#include <cstdlib>
 #include <curl/curl.h>
 #include "networking.hpp"
 #include "helperfunctions.hpp"
+#include "networkpolicy.hpp"
 
 namespace Networking {
     using std::string;
@@ -63,6 +65,8 @@ namespace Networking {
     string getJSONFromURL(const string &url, const std::vector<string> &requestHeaders) {
         // URLs may contain the Telegram bot token, so never print them.
         DEBUG_MSG("[HTTP GET]");
+        const char *proxySetting = std::getenv("KUFAR_PROXY");
+        const auto proxy = NetworkPolicy::kufarProxy(url, proxySetting ? proxySetting : "");
 
         ensureCurlInitialized();
         auto curl = curl_easy_init();
@@ -76,6 +80,11 @@ namespace Networking {
         }
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        if (proxy) {
+            curl_easy_setopt(curl, CURLOPT_PROXY, proxy->c_str());
+            // An inherited NO_PROXY must not silently bypass an explicitly selected route.
+            curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
+        }
         if (headers != nullptr) {
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         }

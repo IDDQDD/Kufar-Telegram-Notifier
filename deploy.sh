@@ -59,7 +59,14 @@ sleep 10
 state="$("${docker_cmd[@]}" inspect --format '{{.State.Status}} {{.RestartCount}}' "$container_id")"
 [[ "$state" == "running ${initial_state##* }" ]] || fail 'Бот остановился или перезапускается. Проверьте: sudo docker compose logs --tail=50'
 "${docker_cmd[@]}" compose ps
-printf '\n%s\n' 'Контейнер работает. В Telegram отправьте /menu и /status для проверки связи.' \
+printf '\n%s\n' 'Контейнер запущен. Проверяю доступ к поиску Kufar из контейнера.'
+if ! "${docker_cmd[@]}" compose exec -T bot /app/Kufar-Telegram-Notifier --check-kufar; then
+    printf '\n%s\n' 'Поиск Kufar недоступен. Контейнер оставлен запущенным для Telegram и диагностики.' \
+        'HTTP 403 с ограничением локации требует доступного исходящего подключения к Kufar.' \
+        'Настройки и кеш сохранены. Логи: sudo docker compose logs --tail=100 bot' >&2
+    exit 2
+fi
+printf '\n%s\n' 'API поиска доступен. В Telegram отправьте /check и /status для проверки ваших запросов.' \
     'Логи: sudo docker compose logs --tail=100 -f' \
     'Остановка: sudo docker compose stop' \
     'Обновление: после обновления исходников снова выполните bash deploy.sh'

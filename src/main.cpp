@@ -297,7 +297,7 @@ QuerySubscription makeSubscription(const int64_t chatID, const json &query) {
     return {
         chatID,
         parseKufarConfiguration(query),
-        query.value("cache-key", query.value("tag", "")),
+        query.value("cache-key", "config|" + query.dump()),
         query.value("exclude-title-groups", vector<vector<string>>{}),
         query.value("required-title-phrases", vector<string>{}),
         query
@@ -910,7 +910,9 @@ Files getFiles(const int &argsCount, char **args) {
 int main(int argc, char **argv) try {
     if (argc == 2 && string(argv[1]) == "--check-kufar") {
         bool available = false;
-        cout << "[CHECK KUFAR]: version 2.9.4; no Telegram calls or state changes" << endl;
+        cout << "[CHECK KUFAR]: version 2.9.5; no Telegram calls or state changes" << endl;
+        const char *proxy = getenv("KUFAR_PROXY");
+        cout << "[CHECK KUFAR]: KUFAR_PROXY=" << (proxy && *proxy ? "configured" : "not configured") << endl;
         for (const auto &result : checkSearchAccess()) {
             cout << result.endpoint << ": ";
             if (result.count) {
@@ -1014,8 +1016,18 @@ int main(int argc, char **argv) try {
             legacyInitializedQueries,
             legacyAdPrices,
             legacyAdLowestPrices,
-            {}
+            {}, {}
         };
+    }
+
+    // Older config searches used just the tag as their initialization marker.
+    // Preserve those baselines while separating distinct categories and filters.
+    for (const auto &subscription : programConfiguration.subscriptions) {
+        if (subscription.sourceQuery.contains("cache-key")) continue;
+        auto &keys = recipientCaches[subscription.chatID].initializedQueries;
+        const string legacyKey = subscription.query.tag.value_or("");
+        if (find(keys.begin(), keys.end(), legacyKey) != keys.end() &&
+            find(keys.begin(), keys.end(), subscription.cacheKey) == keys.end()) keys.push_back(subscription.cacheKey);
     }
 
     string completedBackupRequest = programConfiguration.files.cache.contents.is_object()
@@ -1049,6 +1061,11 @@ int main(int argc, char **argv) try {
             keys.erase(remove_if(keys.begin(), keys.end(), [&](const string &key) {
                 return !activeKeys.count(key);
             }), keys.end());
+            for (auto &[id, origins] : recipientCache.initialOnlyAds) {
+                origins.erase(remove_if(origins.begin(), origins.end(), [&](const string &key) {
+                    return !activeKeys.count(key);
+                }), origins.end());
+            }
             recipientsCache[to_string(chatID)] = Lifecycle::writeCache(recipientCache);
         }
         json successfulChecks = json::object();
@@ -1361,7 +1378,7 @@ int main(int argc, char **argv) try {
                         !searchErrors.empty() ? u8"⚠️ ОШИБКА ПОИСКА" :
                         deliveryFailed ? u8"⚠️ ОШИБКА ОТПРАВКИ" :
                         lastSuccessfulCheckByChat[update.chatID] == 0 ? u8"⏳ ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ" : u8"🟢 БОТ РАБОТАЕТ";
-                    status << heading << u8" · 2.9.4\n\n"
+                    status << heading << u8" · 2.9.5\n\n"
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
@@ -1803,12 +1820,14 @@ int main(int argc, char **argv) try {
                     }
 
                     const string advertID = to_string(advert.id);
-                    if (vectorContains(recipientCache.viewedAds, advert.id)) {
+                    const bool globallySeen = vectorContains(recipientCache.viewedAds, advert.id);
+                    const bool handledHere = Lifecycle::handledByQuery(recipientCache, advert.id, queryKey);
+                    if (handledHere) {
                         ++counts.seen;
                         recipientCache.lastSeen[advertID] = time(nullptr);
                         cacheChanged = true;
                     }
-                    if (!vectorContains(recipientCache.viewedAds, advert.id)) {
+                    if (!handledHere) {
                         bool rememberAdvert = !queryInitialized;
 
                         if (queryInitialized) {
@@ -1839,10 +1858,14 @@ int main(int argc, char **argv) try {
                         }
 
                         if (rememberAdvert) {
-                            if (!queryInitialized) ++counts.primed;
+                            if (!queryInitialized) {
+                                ++counts.primed;
+                                auto &origins = recipientCache.initialOnlyAds[advertID];
+                                if (find(origins.begin(), origins.end(), queryKey) == origins.end()) origins.push_back(queryKey);
+                            } else recipientCache.initialOnlyAds.erase(advertID);
                             // Only mark a new advert as viewed after Telegram confirms delivery.
                             // Initial query priming remains silent and is stored immediately.
-                            recipientCache.viewedAds.push_back(advert.id);
+                            if (!globallySeen) recipientCache.viewedAds.push_back(advert.id);
                             recipientCache.lastSeen[advertID] = time(nullptr);
                             recipientCache.adPrices[advertID] = advert.price;
                             if (advert.price > 0) {
@@ -1880,6 +1903,7 @@ int main(int argc, char **argv) try {
                                     TelegramConfiguration telegramConfiguration = programConfiguration.telegramConfiguration;
                                     telegramConfiguration.chatID = subscription.chatID;
                                     sendPriceDrop(telegramConfiguration, advert, oldPrice);
+                                    recipientCache.initialOnlyAds.erase(advertID);
                                     rememberNewPrice = true;
                                     sentCount += 1;
                                     usleep(300000);

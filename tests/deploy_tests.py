@@ -23,6 +23,7 @@ case "$*" in
     'compose config --quiet') [[ "${MOCK_FAILURE:-}" != config ]] ;;
     'compose build') [[ "${MOCK_FAILURE:-}" != build ]] ;;
     'compose run --rm --no-deps bot --clear-my-queries') [[ "${MOCK_FAILURE:-}" != clear ]] ;;
+    'compose exec -T bot /app/Kufar-Telegram-Notifier --check-kufar') [[ "${MOCK_FAILURE:-}" != api ]] ;;
     'compose ps -aq bot') printf 'test-container\\n' ;;
     inspect*)
         case "${MOCK_FAILURE:-}" in
@@ -90,6 +91,15 @@ esac
     def test_invalid_argument_is_rejected_before_setup(self):
         self.assertNotEqual(self.run_deploy("--unknown").returncode, 0)
         self.assertFalse((self.project / ".env").exists())
+
+    def test_unavailable_search_is_not_reported_as_success(self):
+        self.prepare()
+        result = self.run_deploy(failure="api")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Поиск Kufar недоступен", result.stderr)
+        calls = (self.project / "calls.log").read_text()
+        self.assertLess(calls.index("compose up -d --no-build"), calls.index("compose exec -T bot"))
+        self.assertNotIn("compose stop", calls)
 
     def test_clear_owner_queries_builds_before_stopping_and_starts_only_after_clear(self):
         self.prepare()

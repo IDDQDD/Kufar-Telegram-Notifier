@@ -97,6 +97,11 @@ read -r -p 'Чтобы подтвердить это и запустить ко�
 "${docker_cmd[@]}" compose build
 "${docker_cmd[@]}" compose up -d --no-build
 "${docker_cmd[@]}" compose ps
+if ! "${docker_cmd[@]}" compose exec -T bot /app/Kufar-Telegram-Notifier --check-kufar; then
+    printf '\n%s\n' 'Контейнер запущен, но API поиска Kufar недоступен. Настройки и кеш сохранены.' \
+        'Проверьте причину отказа выше. Логи: sudo docker compose logs --tail=100 bot' >&2
+    exit 2
+fi
 printf '\n%s\n' 'Контейнер запущен. Проверьте /menu и /status в Telegram.' \
     'Логи: sudo docker compose logs --tail=100 -f' \
     'Остановка: sudo docker compose stop' \
