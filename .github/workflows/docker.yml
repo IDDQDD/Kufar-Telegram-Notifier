@@ -14,12 +14,14 @@ jobs:
         run: docker build --progress=plain -t kufar-notifier:test .
       - name: Check deployment scripts
         run: |
-          bash -n deploy-arch.sh deploy.sh update.sh
-          shellcheck deploy-arch.sh deploy.sh update.sh
+          bash -n deploy-arch.sh deploy.sh update.sh setup-git.sh
+          shellcheck deploy-arch.sh deploy.sh update.sh setup-git.sh
           bash deploy-arch.sh --help
           bash deploy.sh --help
           bash update.sh --help
+          bash setup-git.sh --help
           python3 tests/deploy_tests.py
+          python3 tests/setup_git_tests.py
       - name: Validate Compose without real credentials
         run: |
           cp .env.example .env
