@@ -497,7 +497,8 @@ vector<QueryDisplayGroup> groupQueries(const vector<QuerySubscription> &subscrip
 }
 
 string deleteButtonText(const size_t index, const QueryDisplayGroup &group) {
-    return u8"🗑 " + to_string(index + 1) + ". " + group.tag;
+    const string label = trimText(group.tag);
+    return u8"🗑 " + to_string(index + 1) + ". " + (label.empty() ? u8"Без названия" : label);
 }
 
 size_t removeGroupedQueries(
@@ -1308,7 +1309,7 @@ int main(int argc, char **argv) try {
                             });
                         if (!active) error = searchErrors.erase(error); else ++error;
                     }
-                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ · 2.9.1\n\n" : u8"⚠️ ОШИБКА ПОИСКА · 2.9.1\n\n")
+                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ · 2.9.2\n\n" : u8"⚠️ ОШИБКА ПОИСКА · 2.9.2\n\n")
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
@@ -1575,7 +1576,9 @@ int main(int argc, char **argv) try {
                     const vector<QueryDisplayGroup> groups = groupQueries(subscriptions);
                     optional<size_t> selectedIndex;
                     for (size_t index = 0; index < groups.size(); ++index) {
-                        if (text == deleteButtonText(index, groups[index])) {
+                        // Accept both current labels and buttons sent by older versions.
+                        const string legacyButton = u8"🗑 " + to_string(index + 1) + ". " + groups[index].tag;
+                        if (text == deleteButtonText(index, groups[index]) || text == trimText(legacyButton)) {
                             selectedIndex = index;
                             break;
                         }

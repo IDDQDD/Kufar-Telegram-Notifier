@@ -70,7 +70,7 @@ int main() try {
             "category selected once despite repeated delivery");
     require(replies[4].at("text").get<string>().find(u8"Пока ничего не выбрано") != string::npos,
             "a new click can deselect the same category");
-    require(replies.back().at("text").get<string>().find("2.9.1") != string::npos, "status identifies updated code");
+    require(replies.back().at("text").get<string>().find("2.9.2") != string::npos, "status identifies updated code");
 
     replies.clear();
     incoming.push_back(message(10, 107, "/menu"));
@@ -80,6 +80,43 @@ int main() try {
     require(replies.size() == 1, "restart must only reply to the new action");
     require(getJSONDataFromPath(statePath).at("telegram-message-ids").at("123") == 107,
             "latest accepted message survives restart");
+
+    // Legacy configuration can contain whitespace that the incoming-message parser trims.
+    // An old keyboard must still select the group, and deletion must survive a restart.
+    const json legacyConfiguration = {
+        {"telegram", {{"bot-token", "offline-test-token"}, {"chat-id", 123}}},
+        {"queries", json::array()},
+        {"recipients", {
+            {{"chat-id", 123}, {"queries", {{{"tag", u8" Книги  \n"}}, {{"tag", u8"Книга"}, {"category", 4000}}}}},
+            {{"chat-id", 456}, {"queries", {{{"tag", u8"Книги"}}}}}
+        }}
+    };
+    saveFile(configPath, legacyConfiguration.dump());
+    incoming = json::array({message(11, 108, "/delete"), message(12, 109, u8"🗑 1.  Книги  \n"),
+                            message(13, 110, u8"✅ Да, удалить"), message(14, 111, "/queries")});
+    expectedOffset = 11;
+    replies.clear();
+    stopping = 0;
+    require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "legacy deletion run failed");
+    require(replies.size() == 4 && replies[1].at("text").get<string>().find(u8"Точно удалить группу") != string::npos,
+            "old whitespace-padded button must select the intended query instead of being rejected");
+    require(replies.back().at("text") == u8"У вас пока нет запросов.", "all variants of the user's group removed");
+    require(getJSONDataFromPath(statePath).at("query-overrides").at("123").empty(),
+            "empty override prevents deleted legacy configuration queries from returning");
+    require(getJSONDataFromPath(configPath) == legacyConfiguration, "deletion must not modify other users' source configuration");
+
+    auto otherUser = message(16, 75, "/queries");
+    otherUser["message"]["chat"]["id"] = 456;
+    otherUser["message"]["from"]["id"] = 456;
+    incoming = json::array({message(15, 112, "/queries"), otherUser});
+    expectedOffset = 15;
+    replies.clear();
+    stopping = 0;
+    require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "restart after deletion failed");
+    require(replies.size() == 2 && replies[0].at("chat_id") == 123 &&
+            replies[0].at("text") == u8"У вас пока нет запросов.", "deleted group must remain absent after restart");
+    require(replies[1].at("chat_id") == 456 && replies[1].at("text").get<string>().find(u8"Книги") != string::npos,
+            "same query belonging to another user must survive deletion and restart");
     filesystem::remove_all(directory);
     cout << "Offline menu reply tests passed\n";
     return 0;

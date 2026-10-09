@@ -137,6 +137,12 @@ namespace {
     }
 
     void testGroupedQueriesAndDeletionKeyboard() {
+        const auto paddedGroups = groupQueries({makeSubscription(123, {{"tag", u8" Книги  \n"}})});
+        require(deleteButtonText(0, paddedGroups.front()) == u8"🗑 1. Книги",
+                "legacy whitespace must not leak into new deletion button labels");
+        const auto blankGroups = groupQueries({makeSubscription(123, {{"tag", " \t\n"}})});
+        require(deleteButtonText(0, blankGroups.front()) == u8"🗑 1. Без названия",
+                "legacy whitespace-only searches need a usable deletion button");
         const int64_t chatID = 123;
         vector<QuerySubscription> subscriptions = {
             makeSubscription(chatID, {
