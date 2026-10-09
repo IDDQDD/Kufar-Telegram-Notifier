@@ -305,7 +305,14 @@ string trimText(const string &value) {
 }
 
 bool isTelegramCommand(const string &text, const string &command) {
-    return text == command || text.rfind(command + "@", 0) == 0;
+    return text == command || (text.rfind(command + "@", 0) == 0 &&
+        text.size() > command.size() + 1 && text.find_first_of(" \t\r\n") == string::npos);
+}
+
+optional<string> commandArgument(const string &text, const string &command) {
+    const auto separator = text.find_first_of(" \t\r\n");
+    if (!isTelegramCommand(text.substr(0, separator), command)) return nullopt;
+    return separator == string::npos ? string{} : trimText(text.substr(separator));
 }
 
 const vector<CategoryChoice> &categoryChoices() {
@@ -828,12 +835,12 @@ Files getFiles(const int &argsCount, char **args) {
         saveFile(files.cache.path, "[]");
     }
 
-    files.cache.contents = getJSONDataFromPath(files.cache.path, 64 * 1024 * 1024);
+    files.cache.contents = getJSONDataFromPath(files.cache.path, MAX_STATE_BYTES);
     
     return files;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) try {
     signal(SIGTERM, requestStop);
     signal(SIGINT, requestStop);
     ProgramConfiguration programConfiguration;
@@ -879,7 +886,7 @@ int main(int argc, char **argv) {
     printJSONConfigurationData(programConfiguration);
 
     try {
-        setBotCommands(programConfiguration.telegramConfiguration.botToken);
+        setBotCommands(programConfiguration.telegramConfiguration.botToken, access.owner);
     } catch (const exception &exc) {
         cerr << "[ERROR (Telegram commands)]: " << exc.what() << endl;
     }
@@ -921,7 +928,10 @@ int main(int argc, char **argv) {
 
     string completedBackupRequest = programConfiguration.files.cache.contents.is_object()
         ? programConfiguration.files.cache.contents.value("completed-backup-request", string{}) : string{};
+    string lastSavedState;
     const auto saveCache = [&]() {
+        access.compact();
+        Lifecycle::compactQueryOverrides(queryOverrides, access);
         Lifecycle::prune(recipientCaches, time(nullptr), programConfiguration.cacheRetentionDays,
             programConfiguration.cacheMaxPerUser, programConfiguration.cacheMaxTotal);
         json recipientsCache = json::object();
@@ -943,10 +953,15 @@ int main(int argc, char **argv) {
             {"completed-backup-request", completedBackupRequest},
             {"query-overrides", queryOverrides}
         };
-        saveFile(programConfiguration.files.cache.path, cacheData.dump());
+        const string serialized = cacheData.dump();
+        if (serialized != lastSavedState) {
+            saveFile(programConfiguration.files.cache.path, serialized);
+            lastSavedState = serialized;
+        }
     };
 
     map<int64_t, time_t> lastSuccessfulCheckByChat;
+    map<int64_t, map<string, string>> searchErrorsByChat;
     map<int64_t, MenuState> menuStates;
     for (const int64_t chatID : access.users()) {
         recipientCaches[chatID];
@@ -970,6 +985,8 @@ int main(int argc, char **argv) {
                 sendOwnerBackup();
                 completedBackupRequest = request;
                 saveCache();
+            } catch (const StorageError &) {
+                throw;
             } catch (const exception &exc) {
                 cerr << "[ERROR (backup)]: " << exc.what() << endl;
             }
@@ -1030,6 +1047,8 @@ int main(int argc, char **argv) {
                     try {
                         sendOwnerBackup();
                         sendMainMenu(u8"✅ Оба файла отправлены. Скачайте их и храните вместе. Перед переносом остановите старую копию бота.");
+                    } catch (const StorageError &) {
+                        throw;
                     } catch (const exception &) {
                         sendMainMenu(u8"Не удалось отправить оба файла. Повторите /backup позже; нужна полная пара файлов.");
                     }
@@ -1048,17 +1067,25 @@ int main(int argc, char **argv) {
                         {{u8"➕ Добавить пользователя"}, {u8"🚫 Отключить пользователя"}, {u8"💾 Резервная копия"}, {u8"🏠 Главное меню"}});
                     continue;
                 }
-                if (text == u8"➕ Добавить пользователя" || text == u8"🚫 Отключить пользователя") {
+                const auto addUserArgument = commandArgument(text, "/adduser");
+                const auto removeUserArgument = commandArgument(text, "/removeuser");
+                string userIDText = text;
+                if (addUserArgument || removeUserArgument ||
+                    text == u8"➕ Добавить пользователя" || text == u8"🚫 Отключить пользователя") {
                     if (!isOwner) { sendMainMenu(u8"Это действие доступно только владельцу."); continue; }
                     menuState = MenuState{};
-                    menuState.step = text == u8"➕ Добавить пользователя" ? MenuStep::waitingForUserAdd : MenuStep::waitingForUserRemove;
-                    sendTextMessageWithKeyboard(telegramConfiguration,
-                        u8"🪪 Отправьте числовой Telegram ID пользователя. Его можно узнать командой /id у этого бота.",
-                        {{u8"↩️ Отмена"}});
-                    continue;
+                    menuState.step = (addUserArgument || text == u8"➕ Добавить пользователя")
+                        ? MenuStep::waitingForUserAdd : MenuStep::waitingForUserRemove;
+                    userIDText = addUserArgument.value_or(removeUserArgument.value_or(""));
+                    if (userIDText.empty()) {
+                        sendTextMessageWithKeyboard(telegramConfiguration,
+                            u8"🪪 Отправьте числовой Telegram ID пользователя. Его можно узнать командой /id у этого бота.",
+                            {{u8"↩️ Отмена"}});
+                        continue;
+                    }
                 }
                 if (isOwner && (menuState.step == MenuStep::waitingForUserAdd || menuState.step == MenuStep::waitingForUserRemove)) {
-                    const auto target = Lifecycle::parseUserID(text);
+                    const auto target = Lifecycle::parseUserID(userIDText);
                     if (!target) { sendTextMessage(telegramConfiguration, u8"Нужен положительный числовой ID, без @ и пробелов."); continue; }
                     if (*target == access.owner) { sendMainMenu(u8"Владелец уже подключён, отключить себя нельзя."); menuState = MenuState{}; continue; }
                     if (menuState.step == MenuStep::waitingForUserAdd) {
@@ -1099,6 +1126,7 @@ int main(int argc, char **argv) {
                     }
                     menuStates.erase(target);
                     lastSuccessfulCheckByChat.erase(target);
+                    searchErrorsByChat.erase(target);
                     menuState = MenuState{};
                     sendMainMenu(u8"✅ Пользователь " + to_string(target) + u8" отключён. Запросы и кеш удалены.");
                     continue;
@@ -1188,16 +1216,39 @@ int main(int argc, char **argv) {
                     );
 
                     ostringstream status;
-                    status << u8"🟢 БОТ РАБОТАЕТ\n\n"
+                    auto &searchErrors = searchErrorsByChat[update.chatID];
+                    for (auto error = searchErrors.begin(); error != searchErrors.end();) {
+                        const bool active = any_of(programConfiguration.subscriptions.begin(),
+                            programConfiguration.subscriptions.end(), [&](const QuerySubscription &subscription) {
+                                return subscription.chatID == update.chatID && subscription.cacheKey == error->first;
+                            });
+                        if (!active) error = searchErrors.erase(error); else ++error;
+                    }
+                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ\n\n" : u8"⚠️ ОШИБКА ПОИСКА\n\n")
                        << u8"🔎 Активных поисков: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
                        << formatElapsed(lastSuccessfulCheckByChat[update.chatID]) << "\n"
                        << u8"🗃 Объявлений в памяти: "
                        << recipientCaches[update.chatID].viewedAds.size() << "\n"
-                       << u8"⏱ Полный цикл: примерно каждые 5 минут";
+                       << u8"⏱ Интервал цикла: " << programConfiguration.loopDelaySeconds << u8" сек. (долгая проверка увеличивает интервал)";
 
                     status << u8"\n🧹 Кеш: до " << programConfiguration.cacheMaxPerUser
                            << u8" объявлений; хранение " << programConfiguration.cacheRetentionDays << u8" дней без появления в выдаче.";
+                    if (!searchErrors.empty()) {
+                        status << u8"\n⚠️ Не удалось проверить поисков: " << searchErrors.size()
+                               << "\n" << searchErrors.begin()->second;
+                    } else if (lastSuccessfulCheckByChat[update.chatID] == 0 && queryCount > 0) {
+                        status << u8"\n⏳ Ожидается первая успешная проверка. Старые объявления запоминаются без уведомлений.";
+                    }
+                    if (isOwner) {
+                        error_code spaceError;
+                        const auto directory = filesystem::absolute(programConfiguration.files.cache.path).parent_path();
+                        const auto disk = filesystem::space(directory, spaceError);
+                        status << u8"\n💾 Файл состояния: " << getFileSize(programConfiguration.files.cache.path) / 1024
+                               << u8" КиБ / " << MAX_STATE_BYTES / (1024 * 1024)
+                               << u8" МиБ. Общий лимит: " << programConfiguration.cacheMaxTotal << u8" записей.";
+                        if (!spaceError) status << u8"\n📀 Свободно на диске данных: " << disk.available / (1024 * 1024) << u8" МиБ.";
+                    }
                     sendTextMessageWithKeyboard(telegramConfiguration, status.str(), mainMenuKeyboard(isOwner));
                     cout << "[STATUS]: Replied to chat " << update.chatID << endl;
                     continue;
@@ -1515,6 +1566,9 @@ int main(int argc, char **argv) {
             if (offsetChanged) {
                 saveCache();
             }
+        } catch (const StorageError &) {
+            // Do not keep sending notifications after persistence has failed.
+            throw;
         } catch (const exception &exc) {
             cerr << "[ERROR (Telegram menu)]: " << exc.what() << endl;
         }
@@ -1555,7 +1609,9 @@ int main(int argc, char **argv) {
             ) != recipientCache.initializedQueries.end();
             
             try {
-                for (auto advert : getAds(requestConfiguration)) {
+                cout << "[SEARCH]: Chat " << subscription.chatID << ", query=" << queryKey << endl;
+                const auto adverts = getAds(requestConfiguration);
+                for (auto advert : adverts) {
                     if (stopping) break;
                     if (advert.isDemand) {
                         filteredDemandCount += 1;
@@ -1675,6 +1731,9 @@ int main(int argc, char **argv) {
                 }
 
                 lastSuccessfulCheckByChat[subscription.chatID] = time(nullptr);
+                searchErrorsByChat[subscription.chatID].erase(queryKey);
+                cout << "[SEARCH OK]: Chat " << subscription.chatID << ", query=" << queryKey
+                     << ", received=" << adverts.size() << ", sent=" << sentCount << endl;
 
                 if (!queryInitialized && !stopping) {
                     recipientCache.initializedQueries.push_back(queryKey);
@@ -1682,7 +1741,9 @@ int main(int argc, char **argv) {
                     cout << "[CACHE]: Initial listings stored without Telegram notifications for chat " << subscription.chatID << ", query: " << queryKey << endl;
                 }
             } catch (const exception &exc) {
-                cerr << "[ERROR (getAds)]: " << exc.what() << endl;
+                searchErrorsByChat[subscription.chatID][queryKey] = exc.what();
+                cerr << "[ERROR (getAds)]: Chat " << subscription.chatID << ", query=" << queryKey
+                     << ", " << exc.what() << endl;
             }
 
             if (filteredDemandCount > 0 || filteredTitleCount > 0 || filteredQueryTermsCount > 0 || filteredRequiredPhraseCount > 0) {
@@ -1717,4 +1778,7 @@ int main(int argc, char **argv) {
     saveCache();
     cout << "[STOP]: State saved." << endl;
     return 0;
+} catch (const exception &exc) {
+    cerr << "[FATAL]: " << exc.what() << endl;
+    return 1;
 }

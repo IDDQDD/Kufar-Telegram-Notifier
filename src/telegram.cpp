@@ -215,18 +215,26 @@ namespace Telegram {
         sendTextMessageRequest(telegramConfiguration, text, replyMarkup.dump(), nullopt);
     }
 
-    void setBotCommands(const string &botToken) {
-        const json commands = json::array({
+    void setBotCommands(const string &botToken, const int64_t ownerID) {
+        json commands = json::array({
             {{"command", "menu"}, {"description", u8"Открыть главное меню"}},
             {{"command", "queries"}, {"description", u8"Показать мои запросы"}},
             {{"command", "add"}, {"description", u8"Создать новый запрос"}},
             {{"command", "delete"}, {"description", u8"Удалить запрос"}},
             {{"command", "status"}, {"description", u8"Проверить состояние бота"}},
+            {{"command", "id"}, {"description", u8"Узнать свой Telegram ID"}},
             {{"command", "help"}, {"description", u8"Как всё работает"}}
         });
         const string url = "https://api.telegram.org/bot" + botToken + "/setMyCommands";
         const json request = {{"commands", commands}};
         parseTelegramResponse(postJSONToURL(url, request.dump()));
+        commands.push_back({{"command", "users"}, {"description", u8"Управление пользователями"}});
+        commands.push_back({{"command", "adduser"}, {"description", u8"Добавить пользователя по ID"}});
+        commands.push_back({{"command", "removeuser"}, {"description", u8"Удалить пользователя по ID"}});
+        commands.push_back({{"command", "backup"}, {"description", u8"Скачать резервную копию"}});
+        parseTelegramResponse(postJSONToURL(url, json{
+            {"commands", commands}, {"scope", {{"type", "chat"}, {"chat_id", ownerID}}}
+        }.dump()));
     }
 
     string makeImageGroupJSON(const vector<string> &images, const string &caption) {

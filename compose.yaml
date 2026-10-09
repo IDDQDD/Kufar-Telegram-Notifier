@@ -3,6 +3,10 @@ services:
     build: .
     restart: unless-stopped
     init: true
+    mem_limit: 512m
+    pids_limit: 64
+    ulimits:
+      core: 0
     env_file: .env
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}

@@ -62,7 +62,7 @@ sudo docker compose logs --tail=100 -f
 а затем `START`. Выход из просмотра логов — `Ctrl+C`; бот продолжит работать.
 Не запускайте одновременно две копии с одним Telegram-токеном.
 
-Обновление: `git pull --ff-only`, затем `bash deploy-arch.sh`. Остановка:
+Обновление одной командой: `git pull --ff-only && bash update.sh`. Остановка:
 `sudo docker compose stop`. Папку `data/` при обновлении не удаляйте.
 
 ## Пользователи и известные поиски

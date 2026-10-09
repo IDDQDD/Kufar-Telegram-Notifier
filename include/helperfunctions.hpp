@@ -27,6 +27,7 @@
 #endif
 
 #include <optional>
+#include <stdexcept>
 #include "json.hpp"
 
 static const std::string PROPERTY_UNDEFINED = "[UNDEFINED]";
@@ -117,7 +118,15 @@ bool stringHasPrefix(const std::string &, const std::string &);
 /**
  Сохранение текста в файл с перезаписью
  */
-void saveFile(const std::string &path, const std::string &contents);
+class StorageError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+inline constexpr uint64_t MAX_STATE_BYTES = 500ULL * 1024 * 1024;
+inline constexpr uint64_t MIN_FREE_DISK_BYTES = 64ULL * 1024 * 1024;
+void validateStateSize(uint64_t bytes);
+void saveFile(const std::string &path, const std::string &contents,
+              uint64_t reserveBytes = MIN_FREE_DISK_BYTES);
 
 /**
  Возвращает путь, откуда запущено приложение

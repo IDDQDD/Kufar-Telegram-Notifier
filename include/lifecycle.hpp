@@ -36,8 +36,17 @@ struct Access {
     }
     bool change(int64_t actor, int64_t target, bool enabled) {
         if (actor != owner || target == owner || !parseUserID(std::to_string(target))) return false;
-        overrides[target] = enabled;
+        // Only configured users need a persistent denial. Forget removed menu users.
+        if (enabled == (initial.count(target) != 0)) overrides.erase(target);
+        else overrides[target] = enabled;
         return true;
+    }
+    void compact() {
+        for (auto it = overrides.begin(); it != overrides.end();) {
+            if (it->first == owner || it->second == (initial.count(it->first) != 0))
+                it = overrides.erase(it);
+            else ++it;
+        }
     }
     std::set<int64_t> users() const {
         auto result = initial;
@@ -62,6 +71,14 @@ struct Access {
         }
     }
 };
+
+inline void compactQueryOverrides(nlohmann::json &queries, const Access &access) {
+    for (auto it = queries.begin(); it != queries.end();) {
+        const auto id = parseUserID(it.key());
+        if (!id || (!access.allows(*id) && !access.initial.count(*id))) it = queries.erase(it);
+        else ++it;
+    }
+}
 
 struct RecipientCache {
     std::vector<int> viewedAds;

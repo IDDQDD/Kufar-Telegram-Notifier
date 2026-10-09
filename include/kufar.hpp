@@ -10,6 +10,8 @@
 
 #include <vector>
 #include <optional>
+#include <string>
+#include <ctime>
 
 // TODO: В некоторых местах поменять оформление с enum на struct
 

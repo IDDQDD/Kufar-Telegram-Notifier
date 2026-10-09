@@ -100,6 +100,32 @@ namespace {
         require(getTextFromFile(testPath.string()) == "{\"version\":2}", "cache replacement failed");
         require(!filesystem::exists(testPath.string() + ".tmp"), "temporary cache file was not removed");
 
+        const auto assertPreserved = [&](const string &body, uint64_t reserve) {
+            bool rejected = false;
+            try { saveFile(testPath.string(), body, reserve); }
+            catch (const StorageError &) { rejected = true; }
+            require(rejected, "unsafe write must be rejected");
+            require(getTextFromFile(testPath.string()) == "{\"version\":2}", "failed write must preserve previous state");
+            require(!filesystem::exists(testPath.string() + ".tmp"), "rejected write must not create temporary files");
+        };
+        validateStateSize(32ULL * 1024 * 1024 + 1);
+        validateStateSize(MAX_STATE_BYTES);
+        bool oversizedRejected = false;
+        try { validateStateSize(MAX_STATE_BYTES + 1); }
+        catch (const StorageError &) { oversizedRejected = true; }
+        require(oversizedRejected, "state larger than 500 MiB must be rejected");
+        assertPreserved("replacement", filesystem::space(testPath.parent_path()).capacity + 1);
+
+        // A rename failure must also clean its one temporary file.
+        const auto directoryTarget = testPath.string() + ".directory";
+        filesystem::create_directory(directoryTarget);
+        bool renameRejected = false;
+        try { saveFile(directoryTarget, "{}", 0); }
+        catch (const StorageError &) { renameRejected = true; }
+        require(renameRejected && filesystem::is_directory(directoryTarget), "rename failure must preserve target");
+        require(!filesystem::exists(directoryTarget + ".tmp"), "rename failure must clean temporary file");
+        filesystem::remove(directoryTarget);
+
         filesystem::remove(testPath);
     }
 
@@ -230,6 +256,11 @@ namespace {
 }
 
 int main() {
+    require(commandArgument("/adduser 123", "/adduser") == optional<string>("123"), "add command argument");
+    require(commandArgument("/removeuser@mybot\t456", "/removeuser") == optional<string>("456"), "scoped remove command argument");
+    require(commandArgument("/adduser", "/adduser") == optional<string>(""), "empty argument opens prompt");
+    require(!commandArgument("/addusers 123", "/adduser"), "different command rejected");
+    require(!isTelegramCommand("/users@mybot text", "/users"), "command text cannot smuggle trailing arguments");
     {
         ProgramConfiguration configuration;
         configuration.telegramConfiguration = {"secret-must-not-leak", 123};

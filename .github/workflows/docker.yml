@@ -10,13 +10,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Build image and run both test suites
+      - name: Build image and run C++ tests
         run: docker build --progress=plain -t kufar-notifier:test .
-      - name: Check Arch deployment script
+      - name: Check deployment scripts
         run: |
-          bash -n deploy-arch.sh
-          shellcheck deploy-arch.sh
+          bash -n deploy-arch.sh deploy.sh update.sh
+          shellcheck deploy-arch.sh deploy.sh update.sh
           bash deploy-arch.sh --help
+          bash deploy.sh --help
+          bash update.sh --help
+          python3 tests/deploy_tests.py
       - name: Validate Compose without real credentials
         run: |
           cp .env.example .env

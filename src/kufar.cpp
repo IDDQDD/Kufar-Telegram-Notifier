@@ -12,6 +12,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 
 namespace Kufar {
 
@@ -121,14 +122,35 @@ namespace Kufar {
         }
         
         void insertImageURL (vector<string> &images, const json &imageData) {
-            if (imageData.at("yams_storage").get<bool>()) {
-                insertImageURL(images, imageData.at("id"), true);
+            if (!imageData.is_object()) return;
+            const auto id = getOptionalValue<string>(imageData, "id");
+            if (getOptionalValue<bool>(imageData, "yams_storage").value_or(false) && id) {
+                insertImageURL(images, *id, true);
                 return;
             }
-            
-            string mediaStorage = imageData.at("media_storage");
-            string path = imageData.at("path");
-            images.push_back("https://" + mediaStorage + ".kufar.by/v1/gallery/" + path);
+            const auto mediaStorage = getOptionalValue<string>(imageData, "media_storage");
+            const auto path = getOptionalValue<string>(imageData, "path");
+            if (mediaStorage && path && !mediaStorage->empty() && !path->empty())
+                images.push_back("https://" + *mediaStorage + ".kufar.by/v1/gallery/" + *path);
+        }
+
+        int parsePrice(const json &ad) {
+            if (!ad.contains("price_byn") || ad.at("price_byn").is_null()) return 0;
+            const auto &price = ad.at("price_byn");
+            long long value;
+            if (price.is_string()) {
+                const auto text = price.get<string>();
+                if (text.empty()) return 0;
+                size_t consumed = 0;
+                value = stoll(text, &consumed);
+                if (consumed != text.size()) throw runtime_error("Invalid advert price");
+            } else if (price.is_number_integer()) {
+                value = price.get<long long>();
+            } else {
+                throw runtime_error("Invalid advert price type");
+            }
+            if (value < 0 || value > numeric_limits<int>::max()) throw runtime_error("Invalid advert price range");
+            return static_cast<int>(value);
         }
         
         void addURLParameter(ostringstream &ostream, const string &parameter, const string &value, const bool encodeValue = false) {
@@ -194,46 +216,60 @@ namespace Kufar {
         if (configuration.region.has_value()) { addURLParameter(urlStream, "rgn", int(configuration.region.value())); }
         if (configuration.areas.has_value()) { addURLParameter(urlStream, "ar", "v.or:" + joinIntVector(configuration.areas.value(), ",")); }
             
-        string rawJson = getJSONFromURL(urlStream.str());
-        
-        json ads = json::parse(rawJson).at("ads");
+        string rawJson;
+        try {
+            rawJson = getJSONFromURL(urlStream.str());
+        } catch (const exception &exc) {
+            if (string(exc.what()).find("status 403") != string::npos)
+                throw runtime_error(u8"Kufar HTTP 403: доступ к поиску запрещён. Проверьте доступ к Kufar с IP сервера и его локацию.");
+            throw;
+        }
+        const json response = json::parse(rawJson);
+        if (!response.is_object() || !response.contains("ads") || !response.at("ads").is_array())
+            throw runtime_error("Kufar search returned an invalid ads array");
+        const json &ads = response.at("ads");
+        size_t skipped = 0;
 
         for (const auto &ad : ads) {
-            Ad advert;
-            
-            if (configuration.tag.has_value()) {
-                advert.tag = configuration.tag.value();
-            }
-            
-            advert.title = ad.at("subject");
-            advert.id = ad.at("ad_id");
-            advert.date = timestampShift(zuluToTimestamp((string)ad.at("list_time")), 3);
-            advert.price = stoi((string)ad.at("price_byn"));
-            advert.phoneNumberIsVisible = !ad.at("phone_hidden");
-            if (ad.contains("phone") && ad.at("phone").is_string()) {
-                const string phoneNumber = ad.at("phone").get<string>();
-                if (!phoneNumber.empty()) {
-                    advert.phoneNumber = phoneNumber;
+            try {
+                Ad advert{};
+                if (configuration.tag.has_value()) {
+                    advert.tag = configuration.tag.value();
                 }
-            }
-            advert.isDemand = containsDemandCategory(ad);
-            advert.link = ad.at("ad_link");
-            
-            json accountParameters = ad.at("account_parameters");
-            for (const auto &accountParameter : accountParameters) {
-                if (accountParameter.at("p") == "name") {
-                    advert.sellerName = accountParameter.at("v");
-                    break;
+
+                advert.title = ad.at("subject");
+                advert.id = ad.at("ad_id");
+                advert.date = timestampShift(zuluToTimestamp((string)ad.at("list_time")), 3);
+                advert.price = parsePrice(ad);
+                advert.phoneNumberIsVisible = !getOptionalValue<bool>(ad, "phone_hidden").value_or(true);
+                if (ad.contains("phone") && ad.at("phone").is_string()) {
+                    const string phoneNumber = ad.at("phone").get<string>();
+                    if (!phoneNumber.empty()) advert.phoneNumber = phoneNumber;
                 }
+                advert.isDemand = containsDemandCategory(ad);
+                advert.link = ad.at("ad_link");
+
+                if (ad.contains("account_parameters") && ad.at("account_parameters").is_array()) {
+                    for (const auto &accountParameter : ad.at("account_parameters")) {
+                        if (getOptionalValue<string>(accountParameter, "p") == optional<string>("name")) {
+                            advert.sellerName = getOptionalValue<string>(accountParameter, "v").value_or("");
+                            break;
+                        }
+                    }
+                }
+
+                if (ad.contains("images") && ad.at("images").is_array()) {
+                    for (const auto &image : ad.at("images")) insertImageURL(advert.images, image);
+                }
+                adverts.push_back(advert);
+            } catch (const exception &exc) {
+                ++skipped;
+                cerr << "[KUFAR PARSE]: Skipping malformed advert: " << exc.what() << endl;
             }
-            
-            json imagesArray = ad.at("images");
-            for (const auto &image : imagesArray) {
-                insertImageURL(advert.images, image);
-            }
-            
-            adverts.push_back(advert);
         }
+        if (!ads.empty() && adverts.empty())
+            throw runtime_error("Kufar search returned only malformed adverts; query not initialized");
+        if (skipped) cerr << "[KUFAR PARSE]: Skipped " << skipped << " of " << ads.size() << " adverts" << endl;
         
         return adverts;
     }

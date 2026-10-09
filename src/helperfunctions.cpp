@@ -18,6 +18,7 @@
 #include <libgen.h>
 #include <filesystem>
 #include <stdexcept>
+#include "helperfunctions.hpp"
 
 using namespace std;
 
@@ -77,32 +78,49 @@ bool stringHasPrefix(const string &originalString, const string &prefix) {
     return originalString.rfind(prefix, 0) == 0;
 }
 
-void saveFile(const string &path, const string &contents) {
+void validateStateSize(uint64_t bytes) {
+    if (bytes > MAX_STATE_BYTES) {
+        throw StorageError("State exceeds 500 MiB limit; previous state preserved");
+    }
+}
+
+void saveFile(const string &path, const string &contents, uint64_t reserveBytes) {
     const filesystem::path targetPath(path);
     const filesystem::path temporaryPath(path + ".tmp");
+    validateStateSize(contents.size());
+    error_code spaceError;
+    const auto space = filesystem::space(targetPath.has_parent_path() ? targetPath.parent_path() : ".", spaceError);
+    if (spaceError || space.available < contents.size() || space.available - contents.size() < reserveBytes) {
+        throw StorageError("Not enough disk space for state plus reserve (64 MiB by default); previous state preserved");
+    }
 
     ofstream output(temporaryPath, ios::binary | ios::trunc);
     if (!output.is_open()) {
-        throw runtime_error("Unable to open temporary cache file for writing");
+        throw StorageError("Unable to open temporary cache file for writing");
     }
 
     output.write(contents.data(), static_cast<streamsize>(contents.size()));
     output.flush();
     if (!output.good()) {
         output.close();
-        filesystem::remove(temporaryPath);
-        throw runtime_error("Unable to write cache file");
+        error_code ignored;
+        filesystem::remove(temporaryPath, ignored);
+        throw StorageError("Unable to write cache file");
     }
     output.close();
+    if (output.fail()) {
+        error_code ignored;
+        filesystem::remove(temporaryPath, ignored);
+        throw StorageError("Unable to close cache file; previous state preserved");
+    }
 
     error_code renameError;
     filesystem::rename(temporaryPath, targetPath, renameError);
     if (renameError) {
-        filesystem::remove(temporaryPath);
-        throw runtime_error("Unable to atomically replace cache file: " + renameError.message());
+        error_code ignored;
+        filesystem::remove(temporaryPath, ignored);
+        throw StorageError("Unable to atomically replace cache file: " + renameError.message());
     }
-
-    cout << "[Сохранение кеша]: успешно" << endl;
 }
 
 #ifdef __APPLE__

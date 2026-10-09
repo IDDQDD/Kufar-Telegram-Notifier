@@ -31,6 +31,30 @@ int main() {
         try { restarted.load(nlohmann::json{{"4", "true"}}); } catch (...) { rejected = true; }
         require(rejected, "malformed access state rejected");
 
+        // Churning menu users must not accumulate denial records or empty query lists.
+        auto queryOverrides = nlohmann::json::object();
+        for (int64_t id = 100; id < 1100; ++id) {
+            require(restarted.change(1, id, true), "add churn user");
+            require(restarted.change(1, id, false), "remove churn user");
+            queryOverrides[std::to_string(id)] = nlohmann::json::array();
+        }
+        restarted.compact();
+        compactQueryOverrides(queryOverrides, restarted);
+        require(restarted.overrides.size() == 1 && queryOverrides.empty(), "removed menu users leave no growing state");
+        restarted.change(1, 2, false);
+        queryOverrides["2"] = nlohmann::json::array();
+        restarted.compact();
+        compactQueryOverrides(queryOverrides, restarted);
+        Access afterRestart;
+        afterRestart.owner = 1;
+        afterRestart.initial = {1, 2};
+        afterRestart.load(restarted.save());
+        require(!afterRestart.allows(2) && queryOverrides.contains("2"), "configured user remains disabled after compaction and restart");
+        require(afterRestart.change(1, 2, true) && queryOverrides["2"].empty(), "reenabling configured user retains empty search override");
+        restarted.load(nlohmann::json{{"9999", false}});
+        restarted.compact();
+        require(!restarted.save().contains("9999"), "legacy menu-user denials compacted");
+
         const int64_t now = 2000000000;
         const auto legacy = nlohmann::json{
             {"viewed-ads", {10, 11, 12}}, {"initialized-queries", {"search"}},

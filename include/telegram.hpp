@@ -47,7 +47,7 @@ namespace Telegram {
         const std::string &,
         const std::vector<std::vector<std::string>> &
     );
-    void setBotCommands(const std::string &);
+    void setBotCommands(const std::string &, int64_t ownerID);
     AdvertMediaMode advertMediaModeForImageCount(std::size_t);
     std::string formatAdvertCard(const Kufar::Ad &);
     void sendAdvert(const TelegramConfiguration &, const Kufar::Ad &);
