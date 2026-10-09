@@ -31,6 +31,37 @@ int main() {
         require(!claimTelegramUpdate(-1, offset, persist), "invalid update IDs rejected");
         require(!claimTelegramUpdate(std::numeric_limits<int64_t>::max(), offset, persist), "offset must not overflow");
 
+        std::map<std::string, int64_t> messageIDs;
+        std::map<std::string, int64_t> savedMessages;
+        offset = 0;
+        const auto saveDelivery = [&]() { savedOffset = offset; savedMessages = messageIDs; };
+        require(claimTelegramDelivery(1, offset, 123, 40, messageIDs, saveDelivery), "first message accepted");
+        require(savedOffset == 2 && savedMessages.at("123") == 40, "update and message acceptance persisted before reply");
+        require(!claimTelegramDelivery(2, offset, 123, 40, messageIDs, saveDelivery), "same message under a different update cannot reply twice");
+        require(offset == 3 && savedOffset == 3, "duplicate message still acknowledged to Telegram");
+        messageIDs = savedMessages;
+        offset = savedOffset;
+        require(!claimTelegramDelivery(3, offset, 123, 40, messageIDs, saveDelivery), "message replay blocked after restart");
+        require(claimTelegramDelivery(4, offset, 123, 41, messageIDs, saveDelivery), "new click on the same button accepted");
+        require(claimTelegramDelivery(5, offset, 456, 40, messageIDs, saveDelivery), "message IDs belong to individual chats");
+        require(!claimTelegramDelivery(6, offset, 123, 39, messageIDs, saveDelivery), "stale message blocked");
+        const auto beforeFailure = messageIDs;
+        const auto offsetBeforeFailure = offset;
+        writeFailed = false;
+        try {
+            claimTelegramDelivery(7, offset, 123, 42, messageIDs, []() { throw std::runtime_error("disk full"); });
+        } catch (const std::exception &) { writeFailed = true; }
+        require(writeFailed && offset == offsetBeforeFailure && messageIDs == beforeFailure,
+                "failed write rolls back both update and message acceptance");
+        try {
+            claimTelegramDelivery(7, offset, 789, 42, messageIDs, []() { throw std::runtime_error("disk full"); });
+        } catch (const std::exception &) {}
+        require(messageIDs == beforeFailure, "failed first message must not leave a chat record");
+        require(claimTelegramDelivery(7, offset, 0, 42, messageIDs, saveDelivery) && messageIDs == beforeFailure,
+                "unauthorized updates acknowledged without recording chat state");
+        require(!claimTelegramDelivery(7, offset, 123, 42, messageIDs, saveDelivery) && messageIDs == beforeFailure,
+                "stale update cannot change message identity");
+
         require(parseUserID("707549545") == 707549545, "valid ID");
         for (const auto *invalid : {"", "0", "-100123", "@name", "12 34", "123x", "4503599627370496", "99999999999999999999"})
             require(!parseUserID(invalid), "invalid ID rejected");

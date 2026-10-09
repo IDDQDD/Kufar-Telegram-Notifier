@@ -105,6 +105,7 @@ bin/
 .env
 cached-data.json
 cached-data.json.lock
+cached-data.json.before-clear-*.json
 data/
 backups/
 build/

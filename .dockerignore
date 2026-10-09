@@ -5,6 +5,7 @@ Kufar Telegram Notifier.xcodeproj
 build
 bin
 cached-data.json
+cached-data.json.before-clear-*.json
 .env
 .env.*
 data

@@ -42,7 +42,7 @@ int main() try {
     require(requests[1].at("scope") == json{{"type", "chat"}, {"chat_id", 123}}, "admin menu scoped to owner chat");
 
     updates = R"({"ok":true,"result":[
-        {"update_id":1,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"/users"}},
+        {"update_id":1,"message":{"message_id":50,"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"/users"}},
         {"update_id":2,"message":{"chat":{"id":-42,"type":"group"},"from":{"id":123},"text":"/adduser 456"}},
         {"update_id":3,"message":{"chat":{"id":123,"type":"private"},"text":"/removeuser 456"}},
         {"update_id":4,"message":{"chat":{"id":123,"type":"private"},"from":{"id":456},"text":"/users"}}
@@ -50,6 +50,7 @@ int main() try {
     const auto parsed = Telegram::getUpdates("offline-test-token", 0);
     require(parsed.size() == 4, "all update offsets retained");
     require(parsed[0].privateChat && parsed[0].senderID == parsed[0].chatID, "owner identity parsed");
+    require(parsed[0].messageID == 50 && parsed[1].messageID == 0, "message identity parsed independently of update ID");
     require(!parsed[1].privateChat && parsed[1].chatID == -42, "group must remain identifiable as a group");
     require(parsed[2].senderID == 0, "missing sender must not inherit chat identity");
     require(parsed[3].senderID != parsed[3].chatID, "mismatched sender must not inherit chat identity");

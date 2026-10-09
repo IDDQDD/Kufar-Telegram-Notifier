@@ -7,7 +7,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
     Kufar-Telegram-Notifier
-    VERSION 2.8
+    VERSION 2.9
 )
 
 include_directories(include)
@@ -38,6 +38,9 @@ if(BUILD_TESTING)
     add_test(NAME telegram-tests COMMAND Telegram-Tests)
     add_executable(Lifecycle-Tests tests/lifecycle_tests.cpp)
     add_test(NAME lifecycle-tests COMMAND Lifecycle-Tests)
+    add_executable(Menu-Tests tests/menu_tests.cpp src/kufar.cpp src/helperfunctions.cpp src/telegram.cpp)
+    target_compile_options(Menu-Tests PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME menu-tests COMMAND Menu-Tests)
     add_executable(
         Kufar-Telegram-Notifier-Tests
 

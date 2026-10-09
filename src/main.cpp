@@ -658,6 +658,45 @@ void updateQueryOverride(
     queryOverrides[to_string(chatID)] = queries;
 }
 
+json withoutQuerySubscriptions(const ProgramConfiguration &configuration, const json &existingState) {
+    json state = existingState.is_array()
+        ? json{{"viewed-ads", existingState}} : existingState;
+    if (!state.is_object()) throw runtime_error("Invalid state: expected an object or legacy array");
+    set<int64_t> recipients = configuration.access.initial;
+    recipients.insert(configuration.access.owner);
+    for (const auto &subscription : configuration.subscriptions) recipients.insert(subscription.chatID);
+    for (const char *field : {"recipients", "query-overrides", "user-access"}) {
+        if (!state.contains(field)) continue;
+        if (!state.at(field).is_object()) throw runtime_error(string("Invalid state field: ") + field);
+        for (auto item = state.at(field).begin(); item != state.at(field).end(); ++item) {
+            const auto id = Lifecycle::parseUserID(item.key());
+            if (!id) throw runtime_error("Invalid recipient ID in state");
+            recipients.insert(*id);
+        }
+    }
+    state["query-overrides"] = json::object();
+    for (const auto id : recipients) state["query-overrides"][to_string(id)] = json::array();
+    if (state.contains("initialized-queries")) state["initialized-queries"] = json::array();
+    if (state.contains("recipients")) {
+        for (auto &recipient : state["recipients"]) recipient["initialized-queries"] = json::array();
+    }
+    return state;
+}
+
+void clearAllQuerySubscriptions(const ProgramConfiguration &configuration) {
+    const auto &cache = configuration.files.cache;
+    const json cleared = withoutQuerySubscriptions(configuration, cache.contents);
+    // Keep a private, unique backup before replacing state. Neither operation calls Telegram.
+    const auto suffix = chrono::system_clock::now().time_since_epoch().count();
+    const string backup = cache.path + ".before-clear-" + to_string(suffix) + ".json";
+    saveFile(backup, getTextFromFile(cache.path));
+    filesystem::permissions(backup, filesystem::perms::owner_read | filesystem::perms::owner_write,
+                            filesystem::perm_options::replace);
+    saveFile(cache.path, cleared.dump());
+    cout << "[CLEAR]: All users' queries removed; users, history and Telegram offsets preserved.\n"
+         << "[CLEAR]: Previous state saved to " << backup << endl;
+}
+
 json makeBackupConfiguration(const ProgramConfiguration &configuration) {
     json recipients = json::array();
     for (const auto id : configuration.access.users()) {
@@ -868,6 +907,13 @@ int main(int argc, char **argv) try {
     programConfiguration.files = getFiles(argc, argv);
     loadJSONConfigurationData(programConfiguration.files.configuration.contents, programConfiguration);
 
+    for (int i = 1; i < argc; ++i) {
+        if (string(argv[i]) == "--clear-all-queries") {
+            clearAllQuerySubscriptions(programConfiguration);
+            return 0;
+        }
+    }
+
     Lifecycle::Access &access = programConfiguration.access;
 
     json queryOverrides = json::object();
@@ -915,6 +961,7 @@ int main(int argc, char **argv) try {
     map<string, int> legacyAdPrices;
     map<string, int> legacyAdLowestPrices;
     int64_t telegramUpdateOffset = 0;
+    map<string, int64_t> telegramMessageIDs;
     if (programConfiguration.files.cache.contents.is_array()) {
         legacyViewedAds = programConfiguration.files.cache.contents.get<vector<int>>();
     } else {
@@ -923,6 +970,7 @@ int main(int argc, char **argv) try {
         legacyAdPrices = programConfiguration.files.cache.contents.value("ad-prices", map<string, int>{});
         legacyAdLowestPrices = programConfiguration.files.cache.contents.value("ad-lowest-prices", legacyAdPrices);
         telegramUpdateOffset = programConfiguration.files.cache.contents.value("telegram-update-offset", int64_t{0});
+        telegramMessageIDs = programConfiguration.files.cache.contents.value("telegram-message-ids", map<string, int64_t>{});
 
         if (programConfiguration.files.cache.contents.contains("recipients")) {
             const json &recipientsCache = programConfiguration.files.cache.contents.at("recipients");
@@ -953,6 +1001,11 @@ int main(int argc, char **argv) try {
         Lifecycle::compactQueryOverrides(queryOverrides, access);
         Lifecycle::prune(recipientCaches, time(nullptr), programConfiguration.cacheRetentionDays,
             programConfiguration.cacheMaxPerUser, programConfiguration.cacheMaxTotal);
+        for (auto item = telegramMessageIDs.begin(); item != telegramMessageIDs.end();) {
+            const auto id = Lifecycle::parseUserID(item->first);
+            if (!id || !access.allows(*id)) item = telegramMessageIDs.erase(item);
+            else ++item;
+        }
         json recipientsCache = json::object();
         for (auto &[chatID, recipientCache] : recipientCaches) {
             set<string> activeKeys;
@@ -968,6 +1021,7 @@ int main(int argc, char **argv) try {
         json cacheData = {
             {"recipients", recipientsCache},
             {"telegram-update-offset", telegramUpdateOffset},
+            {"telegram-message-ids", telegramMessageIDs},
             {"user-access", access.save()},
             {"completed-backup-request", completedBackupRequest},
             {"query-overrides", queryOverrides}
@@ -1019,7 +1073,9 @@ int main(int argc, char **argv) try {
                 telegramUpdateOffset
             );
             for (const TelegramUpdate &update : updates) {
-                if (!Lifecycle::claimTelegramUpdate(update.updateID, telegramUpdateOffset, saveCache)) continue;
+                const bool allowedMessage = update.privateChat && update.senderID == update.chatID && access.allows(update.chatID);
+                if (!Lifecycle::claimTelegramDelivery(update.updateID, telegramUpdateOffset,
+                        allowedMessage ? update.chatID : 0, update.messageID, telegramMessageIDs, saveCache)) continue;
 
                 if (!update.privateChat || update.senderID != update.chatID || update.chatID <= 0) {
                     continue;
@@ -1035,6 +1091,8 @@ int main(int argc, char **argv) try {
                     continue;
                 }
                 if (!access.allows(update.chatID)) continue;
+                cout << "[MENU UPDATE]: update=" << update.updateID << ", message=" << update.messageID
+                     << ", chat=" << update.chatID << endl;
                 const bool isOwner = update.chatID == access.owner;
                 MenuState &menuState = menuStates[update.chatID];
 
@@ -1238,7 +1296,7 @@ int main(int argc, char **argv) try {
                             });
                         if (!active) error = searchErrors.erase(error); else ++error;
                     }
-                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ\n\n" : u8"⚠️ ОШИБКА ПОИСКА\n\n")
+                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ · 2.9\n\n" : u8"⚠️ ОШИБКА ПОИСКА · 2.9\n\n")
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "

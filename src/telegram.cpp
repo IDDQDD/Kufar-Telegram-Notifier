@@ -168,6 +168,7 @@ namespace Telegram {
 
             if (update.contains("message")) {
                 const json &message = update.at("message");
+                parsedUpdate.messageID = message.value("message_id", int64_t{0});
                 if (message.contains("chat") && message.contains("text")) {
                     parsedUpdate.chatID = message.at("chat").at("id").get<int64_t>();
                     parsedUpdate.text = message.at("text").get<string>();

@@ -14,6 +14,75 @@ namespace {
         }
     }
 
+    void testClearAllQueries() {
+        ProgramConfiguration configuration;
+        configuration.access.owner = 123;
+        configuration.access.initial = {123, 456, 789};
+        configuration.subscriptions = {
+            makeSubscription(123, {{"tag", u8"Книги"}}),
+            makeSubscription(456, {{"tag", u8"Гиря"}})
+        };
+        const json oldState = {
+            {"telegram-update-offset", 90}, {"telegram-message-ids", {{"123", 70}}},
+            {"user-access", {{"777", true}, {"789", false}}},
+            {"query-overrides", {{"777", {{{"tag", "old query"}}}}}},
+            {"recipients", {{"456", {{"viewed-ads", {42}}, {"initialized-queries", {"old"}},
+                                       {"ad-prices", {{"42", 100}}}}}}},
+            {"completed-backup-request", "keep"}
+        };
+        const auto state = withoutQuerySubscriptions(configuration, oldState);
+        for (const auto id : {123, 456, 777, 789})
+            require(state.at("query-overrides").at(to_string(id)).empty(), "all users' query overrides cleared, including disabled users");
+        require(state.at("telegram-update-offset") == 90 && state.at("telegram-message-ids") == oldState.at("telegram-message-ids"),
+                "clearing queries must not replay processed commands");
+        require(state.at("user-access") == oldState.at("user-access") && state.at("completed-backup-request") == "keep",
+                "clearing queries preserves user access and backup state");
+        require(state.at("recipients").at("456").at("viewed-ads") == json::array({42}) &&
+                state.at("recipients").at("456").at("ad-prices") == oldState.at("recipients").at("456").at("ad-prices"),
+                "clearing queries preserves advert and price history");
+        require(state.at("recipients").at("456").at("initialized-queries").empty(), "removed searches no longer initialized");
+        applyQueryOverrides(configuration, state.at("query-overrides"));
+        require(configuration.subscriptions.empty(), "configured and menu searches must remain empty on restart");
+        const auto legacy = withoutQuerySubscriptions(configuration, json::array({10, 11}));
+        require(legacy.at("viewed-ads") == json::array({10, 11}), "legacy advert history preserved");
+
+        const auto directory = filesystem::temp_directory_path() /
+            ("kufar-clear-test-" + to_string(chrono::system_clock::now().time_since_epoch().count()));
+        filesystem::create_directory(directory);
+        const auto cachePath = directory / "cache.json";
+        const auto configPath = directory / "config.json";
+        saveFile(cachePath.string(), oldState.dump());
+        const json rawConfiguration = {
+            {"telegram", {{"bot-token", "1111111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, {"chat-id", 123}}},
+            {"queries", {{{"tag", "configured query"}}}},
+            {"recipients", {{{"chat-id", 123}, {"queries", {{{"tag", "configured query"}}}}},
+                            {{"chat-id", 456}, {"queries", json::array()}}}}
+        };
+        saveFile(configPath.string(), rawConfiguration.dump());
+        vector<string> arguments = {"offline-test", "--config=" + configPath.string(), "--cache=" + cachePath.string(), "--clear-all-queries"};
+        vector<char *> argv;
+        for (auto &argument : arguments) argv.push_back(argument.data());
+        require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0,
+                "one-shot clear exits before token validation and never launches a live bot");
+        const auto clearedOnDisk = getJSONDataFromPath(cachePath.string());
+        require(clearedOnDisk.at("query-overrides").at("123").empty() && clearedOnDisk.at("telegram-update-offset") == 90,
+                "one-shot command clears stored searches without losing the offset");
+        require(getJSONDataFromPath(configPath.string()) == rawConfiguration, "source configuration retained for recovery");
+        bool backupFound = false;
+        for (const auto &entry : filesystem::directory_iterator(directory)) {
+            if (entry.path().filename().string().find("cache.json.before-clear-") != 0) continue;
+            require(getJSONDataFromPath(entry.path().string()) == oldState, "backup contains previous state");
+#if defined(__linux__)
+            require((entry.status().permissions() & filesystem::perms::group_read) == filesystem::perms::none &&
+                    (entry.status().permissions() & filesystem::perms::others_read) == filesystem::perms::none,
+                    "backup must be private");
+#endif
+            backupFound = true;
+        }
+        require(backupFound, "clear command creates a recovery backup");
+        filesystem::remove_all(directory);
+    }
+
     void testMultiwordMatching() {
         require(
             matchesMultiwordQuery(u8"Импульсный блок питания", optional<string>(u8"блок питания")),
@@ -309,6 +378,7 @@ int main() {
                 "backup retains owner searches");
     }
     testMultiwordMatching();
+    testClearAllQueries();
     testGroupedQueriesAndDeletionKeyboard();
     testWordFormGrouping();
     testAtomicCacheWrite();

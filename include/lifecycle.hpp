@@ -25,6 +25,32 @@ inline bool claimTelegramUpdate(int64_t updateID, int64_t &nextOffset, Persist p
     return true;
 }
 
+// A message can only trigger an action once, even if delivered under another update ID.
+// New messages with the same text remain independent actions (e.g. toggling a category).
+template<typename Persist>
+inline bool claimTelegramDelivery(int64_t updateID, int64_t &nextOffset,
+                                 int64_t chatID, int64_t messageID,
+                                 std::map<std::string, int64_t> &messageIDs, Persist persist) {
+    const std::string key = std::to_string(chatID);
+    const auto previous = messageIDs.find(key);
+    const bool existed = previous != messageIDs.end();
+    const int64_t oldMessageID = existed ? previous->second : 0;
+    bool fresh = true;
+    const bool accepted = claimTelegramUpdate(updateID, nextOffset, [&]() {
+        if (chatID > 0 && messageID > 0) {
+            fresh = messageID > oldMessageID;
+            if (fresh) messageIDs[key] = messageID;
+        }
+        try { persist(); }
+        catch (...) {
+            if (existed) messageIDs[key] = oldMessageID;
+            else messageIDs.erase(key);
+            throw;
+        }
+    });
+    return accepted && fresh;
+}
+
 inline std::optional<int64_t> parseUserID(const std::string &text) {
     if (text.empty() || text.size() > 16 ||
         text.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
