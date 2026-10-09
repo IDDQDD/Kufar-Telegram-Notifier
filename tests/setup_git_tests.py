@@ -95,6 +95,59 @@ class SetupGitTests(unittest.TestCase):
         self.assertFalse((self.project / "backups").exists())
         self.assertEqual((self.project / "src" / "main.cpp").read_text(), "old code\n")
 
+    def test_invalid_git_directory_is_preserved_and_replaced(self):
+        invalid = self.project / ".git"
+        invalid.mkdir()
+        (invalid / "keep-metadata").write_bytes(b"preserve these bytes")
+        before = (self.project / "kufar-configuration.json").read_bytes()
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git_run(self.project, "branch", "--show-current").strip(), "main")
+        self.assertEqual((self.project / "kufar-configuration.json").read_bytes(), before)
+        backups = list((self.project / "backups").glob("*.git-backup"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "keep-metadata").read_bytes(), b"preserve these bytes")
+
+    def test_invalid_git_file_is_preserved_and_replaced(self):
+        (self.project / ".git").write_bytes(b"invalid metadata file")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backups = list((self.project / "backups").glob("*.git-backup"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"invalid metadata file")
+        self.assertEqual(self.git_run(self.project, "branch", "--show-current").strip(), "main")
+
+    def test_failed_clone_does_not_move_invalid_git(self):
+        invalid = self.project / ".git"
+        invalid.mkdir()
+        (invalid / "keep-metadata").write_bytes(b"keep here")
+        self.env["KUFAR_REPOSITORY_URL"] = self.root.joinpath("missing-repository").as_posix()
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((invalid / "keep-metadata").read_bytes(), b"keep here")
+        self.assertFalse((self.project / "backups").exists())
+
+    def test_inherited_git_paths_do_not_override_installation(self):
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"):
+            self.env[name] = self.root.joinpath("wrong-path").as_posix()
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"):
+            self.env.pop(name)
+        self.assertEqual(self.git_run(self.project, "branch", "--show-current").strip(), "main")
+
+    def test_existing_development_changes_are_not_replaced(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.project / "src" / "main.cpp").write_text("my development\n", encoding="utf-8")
+        (self.upstream / "src" / "main.cpp").write_text("conflicting release\n", encoding="utf-8")
+        self.commit("conflicting release")
+        again = self.install()
+        self.assertNotEqual(again.returncode, 0)
+        self.assertEqual((self.project / "src" / "main.cpp").read_text(), "my development\n")
+        self.assertEqual(len(list((self.project / "backups").glob("*.tar.gz"))), 1)
+        self.assertFalse(list((self.project / "backups").glob("*.git-backup")))
+
 
 if __name__ == "__main__":
     unittest.main()

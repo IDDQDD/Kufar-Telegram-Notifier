@@ -16,11 +16,23 @@ cd -- "$project_dir"
     || fail 'Перейдите в папку бота: в ней должны быть .env, compose.yaml и kufar-configuration.json.'
 command -v git >/dev/null || fail 'Установите Git, затем повторите команду.'
 
-if [[ -e .git ]]; then
-    git_root="$(git rev-parse --show-toplevel)"
-    [[ "$(cd -- "$git_root" && pwd -P)" == "$project_dir" ]] || fail 'Не удалось определить репозиторий этой папки.'
-    git pull --ff-only
-    exec bash "$project_dir/update.sh"
+# Use this installation's metadata, rather than inherited paths from another shell.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+broken_git=false
+if [[ -e .git || -L .git ]]; then
+    if git_root="$(LC_ALL=C git rev-parse --show-toplevel 2>&1)"; then
+        [[ "$(cd -- "$git_root" && pwd -P)" == "$project_dir" ]] || fail 'Не удалось определить репозиторий этой папки.'
+        git pull --ff-only
+        exec bash "$project_dir/update.sh"
+    else
+        case "$git_root" in
+            *'not a git repository'*|*'invalid gitfile format'*|*'invalid .git file'*)
+                broken_git=true
+                printf '%s\n' 'Найдена непригодная .git. Сохраню её в backups и подключу репозиторий заново.'
+                ;;
+            *) fail "Не удалось проверить .git; она оставлена на месте: $git_root" ;;
+        esac
+    fi
 fi
 command -v tar >/dev/null || fail 'Нужен tar для резервной копии текущих файлов.'
 repository_url="${KUFAR_REPOSITORY_URL:-https://github.com/IDDQDD/Kufar-Telegram-Notifier.git}"
@@ -47,7 +59,14 @@ chmod 600 "$backup"
 printf 'Исходные файлы и настройки сохранены: %s\n' "$backup"
 
 # Attach the real clone's metadata. Restore code only; keep server configuration.
-mv -- "$staging/repository/.git" "$project_dir/.git"
+if [[ "$broken_git" == true ]]; then
+    mv -- "$project_dir/.git" "$backup.git-backup"
+    printf 'Прежняя .git сохранена: %s\n' "$backup.git-backup"
+fi
+if ! mv -- "$staging/repository/.git" "$project_dir/.git"; then
+    if [[ "$broken_git" == true ]]; then mv -- "$backup.git-backup" "$project_dir/.git"; fi
+    fail 'Не удалось подключить .git. Прежняя установка сохранена.'
+fi
 git restore --worktree -- . ':(exclude)kufar-configuration.json' ':(exclude).env' \
     ':(exclude)cached-data.json' ':(exclude)data/**' ':(exclude)backups/**'
 git update-index --skip-worktree -- kufar-configuration.json
