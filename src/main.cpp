@@ -1008,6 +1008,14 @@ int main(int argc, char **argv) try {
 
     string completedBackupRequest = programConfiguration.files.cache.contents.is_object()
         ? programConfiguration.files.cache.contents.value("completed-backup-request", string{}) : string{};
+    map<int64_t, time_t> lastSuccessfulCheckByChat;
+    if (programConfiguration.files.cache.contents.is_object()) {
+        const auto checks = programConfiguration.files.cache.contents.value("last-successful-checks", map<string, int64_t>{});
+        for (const auto &[key, timestamp] : checks) {
+            const auto id = Lifecycle::parseUserID(key);
+            if (id && access.allows(*id) && timestamp > 0) lastSuccessfulCheckByChat[*id] = timestamp;
+        }
+    }
     string lastSavedState;
     const auto saveCache = [&]() {
         access.compact();
@@ -1031,10 +1039,15 @@ int main(int argc, char **argv) try {
             }), keys.end());
             recipientsCache[to_string(chatID)] = Lifecycle::writeCache(recipientCache);
         }
+        json successfulChecks = json::object();
+        for (const auto &[id, timestamp] : lastSuccessfulCheckByChat) {
+            if (access.allows(id) && timestamp > 0) successfulChecks[to_string(id)] = timestamp;
+        }
         json cacheData = {
             {"recipients", recipientsCache},
             {"telegram-update-offset", telegramUpdateOffset},
             {"telegram-message-ids", telegramMessageIDs},
+            {"last-successful-checks", successfulChecks},
             {"user-access", access.save()},
             {"completed-backup-request", completedBackupRequest},
             {"query-overrides", queryOverrides}
@@ -1046,9 +1059,9 @@ int main(int argc, char **argv) try {
         }
     };
 
-    map<int64_t, time_t> lastSuccessfulCheckByChat;
     map<int64_t, map<string, string>> searchErrorsByChat;
     map<int64_t, MenuState> menuStates;
+    uint64_t subscriptionRevision = 0;
     for (const int64_t chatID : access.users()) {
         recipientCaches[chatID];
     }
@@ -1214,6 +1227,7 @@ int main(int argc, char **argv) try {
                     searchErrorsByChat.erase(target);
                     menuState = MenuState{};
                     sendMainMenu(u8"✅ Пользователь " + to_string(target) + u8" отключён. Запросы и кеш удалены.");
+                    ++subscriptionRevision;
                     continue;
                 }
 
@@ -1309,18 +1323,24 @@ int main(int argc, char **argv) try {
                             });
                         if (!active) error = searchErrors.erase(error); else ++error;
                     }
-                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ · 2.9.2\n\n" : u8"⚠️ ОШИБКА ПОИСКА · 2.9.2\n\n")
+                    const string heading = queryCount == 0 ? u8"⚪ ПОИСКИ НЕ НАСТРОЕНЫ" :
+                        !searchErrors.empty() ? u8"⚠️ ОШИБКА ПОИСКА" :
+                        lastSuccessfulCheckByChat[update.chatID] == 0 ? u8"⏳ ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ" : u8"🟢 БОТ РАБОТАЕТ";
+                    status << heading << u8" · 2.9.3\n\n"
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
-                       << formatElapsed(lastSuccessfulCheckByChat[update.chatID]) << "\n"
+                       << (queryCount == 0 ? u8"поисков нет" : formatElapsed(lastSuccessfulCheckByChat[update.chatID])) << "\n"
                        << u8"🗃 Объявлений в памяти: "
                        << recipientCaches[update.chatID].viewedAds.size() << "\n"
                        << u8"⏱ Интервал цикла: " << programConfiguration.loopDelaySeconds << u8" сек. (долгая проверка увеличивает интервал)";
 
                     status << u8"\n🧹 Кеш: до " << programConfiguration.cacheMaxPerUser
                            << u8" объявлений; хранение " << programConfiguration.cacheRetentionDays << u8" дней без появления в выдаче.";
-                    if (!searchErrors.empty()) {
+                    if (queryCount == 0) {
+                        status << u8"\n➕ Нажмите «Новый запрос», чтобы начать мониторинг.\n"
+                               << u8"Без сохранённых запросов бот не обращается к поиску Kufar.";
+                    } else if (!searchErrors.empty()) {
                         status << u8"\n⚠️ Не удалось проверить поисков: " << searchErrors.size()
                                << "\n" << searchErrors.begin()->second;
                     } else if (lastSuccessfulCheckByChat[update.chatID] == 0 && queryCount > 0) {
@@ -1538,6 +1558,7 @@ int main(int argc, char **argv) try {
                         recipientCaches[update.chatID];
                         updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
                         saveCache();
+                        ++subscriptionRevision;
                     }
 
                     menuState = MenuState{};
@@ -1638,6 +1659,7 @@ int main(int argc, char **argv) try {
                     );
                     updateQueryOverride(queryOverrides, programConfiguration, update.chatID);
                     saveCache();
+                    ++subscriptionRevision;
                     menuState = MenuState{};
                     sendMainMenu(
                         u8"✅ Запрос «" + removedTag + u8"» удалён во всех категориях.\n"
@@ -1659,8 +1681,8 @@ int main(int argc, char **argv) try {
         }
     };
 
-    const auto sleepWithStatusPolling = [&](int seconds) {
-        while (seconds > 0 && !stopping) {
+    const auto sleepWithStatusPolling = [&](int seconds, uint64_t expectedRevision) {
+        while (seconds > 0 && !stopping && subscriptionRevision == expectedRevision) {
             const int chunk = min(seconds, 5);
             sleep(chunk);
             seconds -= chunk;
@@ -1672,11 +1694,12 @@ int main(int argc, char **argv) try {
 
     while (!stopping) {
         const auto cycleStartedAt = chrono::steady_clock::now();
+        const uint64_t cycleRevision = subscriptionRevision;
         // Menu actions can add or remove subscriptions while a cycle is running.
         // Work on a snapshot so Telegram changes take effect safely on the next cycle.
         const vector<QuerySubscription> cycleSubscriptions = programConfiguration.subscriptions;
         for (const auto &subscription : cycleSubscriptions) {
-            if (stopping) break;
+            if (stopping || subscriptionRevision != cycleRevision) break;
             if (!access.allows(subscription.chatID)) continue;
             unsigned int sentCount = 0;
             unsigned int filteredDemandCount = 0;
@@ -1845,20 +1868,20 @@ int main(int argc, char **argv) try {
             }
 
             pollBotCommands();
-            sleepWithStatusPolling(programConfiguration.queryDelaySeconds);
+            sleepWithStatusPolling(programConfiguration.queryDelaySeconds, cycleRevision);
         }
 
         const int elapsedSeconds = static_cast<int>(chrono::duration_cast<chrono::seconds>(
             chrono::steady_clock::now() - cycleStartedAt
         ).count());
-        const int remainingCycleSeconds = remainingCycleDelay(
+        const int remainingCycleSeconds = subscriptionRevision != cycleRevision ? 0 : remainingCycleDelay(
             programConfiguration.loopDelaySeconds,
             elapsedSeconds
         );
         cout << "[CYCLE]: completed in " << elapsedSeconds
              << "s, next cycle in " << remainingCycleSeconds << "s" << endl;
         saveCache();
-        sleepWithStatusPolling(remainingCycleSeconds);
+        sleepWithStatusPolling(remainingCycleSeconds, cycleRevision);
     }
     saveCache();
     cout << "[STOP]: State saved." << endl;

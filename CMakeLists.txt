@@ -7,7 +7,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
     Kufar-Telegram-Notifier
-    VERSION 2.9.2
+    VERSION 2.9.3
 )
 
 include_directories(include)
