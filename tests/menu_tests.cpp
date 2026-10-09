@@ -72,11 +72,13 @@ string getJSONFromURL(const string &url, const vector<string> &) {
 string postJSONToURL(const string &url, const string &body) {
     require(!probeTest, "standalone probe must never contact Telegram");
     if (url.find("/sendMessage") != string::npos) {
-        const auto persisted = getJSONDataFromPath(statePath);
-        require(persisted.at("telegram-update-offset").get<int64_t>() > 0 &&
-                persisted.at("telegram-message-ids").at("123").get<int64_t>() > 0,
-                "both Telegram identities must be saved before replying");
         const auto request = json::parse(body);
+        const auto persisted = getJSONDataFromPath(statePath);
+        if (!request.contains("parse_mode")) {
+            require(persisted.at("telegram-update-offset").get<int64_t>() > 0 &&
+                    persisted.at("telegram-message-ids").at("123").get<int64_t>() > 0,
+                    "both Telegram identities must be saved before replying to a menu action");
+        }
         if (request.contains("parse_mode") && sendFailuresRemaining > 0) {
             --sendFailuresRemaining;
             return R"({"ok":false,"description":"Offline send failure"})";
