@@ -70,7 +70,7 @@ int main() try {
             "category selected once despite repeated delivery");
     require(replies[4].at("text").get<string>().find(u8"Пока ничего не выбрано") != string::npos,
             "a new click can deselect the same category");
-    require(replies.back().at("text").get<string>().find("2.9") != string::npos, "status identifies updated code");
+    require(replies.back().at("text").get<string>().find("2.9.1") != string::npos, "status identifies updated code");
 
     replies.clear();
     incoming.push_back(message(10, 107, "/menu"));

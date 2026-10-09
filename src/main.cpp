@@ -658,7 +658,8 @@ void updateQueryOverride(
     queryOverrides[to_string(chatID)] = queries;
 }
 
-json withoutQuerySubscriptions(const ProgramConfiguration &configuration, const json &existingState) {
+json withoutQuerySubscriptions(const ProgramConfiguration &configuration, const json &existingState,
+                               optional<int64_t> onlyChatID = nullopt) {
     json state = existingState.is_array()
         ? json{{"viewed-ads", existingState}} : existingState;
     if (!state.is_object()) throw runtime_error("Invalid state: expected an object or legacy array");
@@ -674,18 +675,24 @@ json withoutQuerySubscriptions(const ProgramConfiguration &configuration, const 
             recipients.insert(*id);
         }
     }
-    state["query-overrides"] = json::object();
+    if (onlyChatID) recipients = {*onlyChatID};
+    if (!onlyChatID || !state.contains("query-overrides")) state["query-overrides"] = json::object();
     for (const auto id : recipients) state["query-overrides"][to_string(id)] = json::array();
-    if (state.contains("initialized-queries")) state["initialized-queries"] = json::array();
+    if (state.contains("initialized-queries") &&
+        (!onlyChatID || *onlyChatID == configuration.telegramConfiguration.chatID)) {
+        state["initialized-queries"] = json::array();
+    }
     if (state.contains("recipients")) {
-        for (auto &recipient : state["recipients"]) recipient["initialized-queries"] = json::array();
+        for (auto item = state["recipients"].begin(); item != state["recipients"].end(); ++item) {
+            if (!onlyChatID || item.key() == to_string(*onlyChatID)) item.value()["initialized-queries"] = json::array();
+        }
     }
     return state;
 }
 
-void clearAllQuerySubscriptions(const ProgramConfiguration &configuration) {
+void clearQuerySubscriptions(const ProgramConfiguration &configuration, optional<int64_t> onlyChatID = nullopt) {
     const auto &cache = configuration.files.cache;
-    const json cleared = withoutQuerySubscriptions(configuration, cache.contents);
+    const json cleared = withoutQuerySubscriptions(configuration, cache.contents, onlyChatID);
     // Keep a private, unique backup before replacing state. Neither operation calls Telegram.
     const auto suffix = chrono::system_clock::now().time_since_epoch().count();
     const string backup = cache.path + ".before-clear-" + to_string(suffix) + ".json";
@@ -693,7 +700,8 @@ void clearAllQuerySubscriptions(const ProgramConfiguration &configuration) {
     filesystem::permissions(backup, filesystem::perms::owner_read | filesystem::perms::owner_write,
                             filesystem::perm_options::replace);
     saveFile(cache.path, cleared.dump());
-    cout << "[CLEAR]: All users' queries removed; users, history and Telegram offsets preserved.\n"
+    cout << "[CLEAR]: " << (onlyChatID ? "Queries removed for owner " + to_string(*onlyChatID) : "All users' queries removed")
+         << "; users, history and Telegram offsets preserved.\n"
          << "[CLEAR]: Previous state saved to " << backup << endl;
 }
 
@@ -909,7 +917,11 @@ int main(int argc, char **argv) try {
 
     for (int i = 1; i < argc; ++i) {
         if (string(argv[i]) == "--clear-all-queries") {
-            clearAllQuerySubscriptions(programConfiguration);
+            clearQuerySubscriptions(programConfiguration);
+            return 0;
+        }
+        if (string(argv[i]) == "--clear-my-queries") {
+            clearQuerySubscriptions(programConfiguration, programConfiguration.access.owner);
             return 0;
         }
     }
@@ -1296,7 +1308,7 @@ int main(int argc, char **argv) try {
                             });
                         if (!active) error = searchErrors.erase(error); else ++error;
                     }
-                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ · 2.9\n\n" : u8"⚠️ ОШИБКА ПОИСКА · 2.9\n\n")
+                    status << (searchErrors.empty() ? u8"🟢 БОТ РАБОТАЕТ · 2.9.1\n\n" : u8"⚠️ ОШИБКА ПОИСКА · 2.9.1\n\n")
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "

@@ -80,6 +80,40 @@ namespace {
             backupFound = true;
         }
         require(backupFound, "clear command creates a recovery backup");
+
+        json ownerState = oldState;
+        ownerState["recipients"]["123"] = {{"viewed-ads", {55}}, {"initialized-queries", {"owner search"}}};
+        ProgramConfiguration ownerConfiguration;
+        ownerConfiguration.telegramConfiguration.chatID = 123;
+        ownerConfiguration.access.owner = 123;
+        ownerConfiguration.access.initial = {123, 456};
+        ownerConfiguration.subscriptions = {
+            makeSubscription(123, {{"tag", "owner query"}}),
+            makeSubscription(456, {{"tag", "other user's query"}})
+        };
+        const auto ownerCleared = withoutQuerySubscriptions(ownerConfiguration, ownerState, 123);
+        require(ownerCleared.at("query-overrides").at("123").empty(), "owner's queries cleared");
+        require(ownerCleared.at("query-overrides").at("777") == ownerState.at("query-overrides").at("777"),
+                "other menu user's queries must remain unchanged");
+        require(ownerCleared.at("recipients").at("456") == ownerState.at("recipients").at("456"),
+                "other user's initialization and advert history must remain unchanged");
+        require(ownerCleared.at("recipients").at("123").at("initialized-queries").empty() &&
+                ownerCleared.at("recipients").at("123").at("viewed-ads") == json::array({55}),
+                "owner's search initialization cleared while history retained");
+        applyQueryOverrides(ownerConfiguration, ownerCleared.at("query-overrides"));
+        require(ownerConfiguration.subscriptions.size() == 2 &&
+                none_of(ownerConfiguration.subscriptions.begin(), ownerConfiguration.subscriptions.end(),
+                        [](const auto &subscription) { return subscription.chatID == 123; }),
+                "only owner's queries remain empty on restart; other configured and menu searches survive");
+        const auto ownerCachePath = directory / "owner-cache.json";
+        saveFile(ownerCachePath.string(), ownerState.dump());
+        arguments[2] = "--cache=" + ownerCachePath.string();
+        arguments[3] = "--clear-my-queries";
+        argv.clear();
+        for (auto &argument : arguments) argv.push_back(argument.data());
+        require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "owner-only clear must exit offline");
+        require(getJSONDataFromPath(ownerCachePath.string()) == ownerCleared,
+                "one-shot owner command preserves all other users and Telegram offsets on disk");
         filesystem::remove_all(directory);
     }
 

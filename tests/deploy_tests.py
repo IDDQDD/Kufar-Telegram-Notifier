@@ -22,6 +22,7 @@ printf '%s\\n' "$*" >> calls.log
 case "$*" in
     'compose config --quiet') [[ "${MOCK_FAILURE:-}" != config ]] ;;
     'compose build') [[ "${MOCK_FAILURE:-}" != build ]] ;;
+    'compose run --rm --no-deps bot --clear-my-queries') [[ "${MOCK_FAILURE:-}" != clear ]] ;;
     'compose ps -aq bot') printf 'test-container\\n' ;;
     inspect*)
         case "${MOCK_FAILURE:-}" in
@@ -89,6 +90,19 @@ esac
     def test_invalid_argument_is_rejected_before_setup(self):
         self.assertNotEqual(self.run_deploy("--unknown").returncode, 0)
         self.assertFalse((self.project / ".env").exists())
+
+    def test_clear_owner_queries_builds_before_stopping_and_starts_only_after_clear(self):
+        self.prepare()
+        result = self.run_deploy("--clear-my-queries")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.project / "calls.log").read_text()
+        self.assertLess(calls.index("compose build"), calls.index("compose stop bot"))
+        self.assertLess(calls.index("compose stop bot"), calls.index("compose run --rm --no-deps bot --clear-my-queries"))
+        self.assertLess(calls.index("compose run --rm --no-deps bot --clear-my-queries"), calls.index("compose up -d --no-build"))
+        (self.project / "calls.log").write_text("")
+        result = self.run_deploy("--clear-my-queries", failure="clear")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("compose up", (self.project / "calls.log").read_text())
 
 
 if __name__ == "__main__":

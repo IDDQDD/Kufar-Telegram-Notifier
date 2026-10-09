@@ -8,10 +8,11 @@ mode="${1:-start}"
 if [[ "$mode" == '--help' || "$mode" == '-h' ]]; then
     printf '%s\n' 'bash deploy.sh --prepare — создать .env и папку data без запуска' \
         'bash deploy.sh — собрать, проверить и запустить бота через Docker Compose' \
+        'bash deploy.sh --clear-my-queries — обновить и удалить только запросы владельца' \
         'Настройки, кеш и резервные копии не перезаписываются. Инструкция: SERVER_SETUP.md'
     exit 0
 fi
-[[ $# -le 1 && ( "$mode" == start || "$mode" == --prepare ) ]] || fail 'Неизвестные аргументы. Используйте --help.'
+[[ $# -le 1 && ( "$mode" == start || "$mode" == --prepare || "$mode" == --clear-my-queries ) ]] || fail 'Неизвестные аргументы. Используйте --help.'
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd -- "$project_dir"
 [[ -f compose.yaml && -f Dockerfile && -f .env.example && -f kufar-configuration.json ]] || fail 'Нужна полная папка проекта.'
@@ -46,6 +47,10 @@ free_kib="$(df -Pk data | awk 'NR == 2 {print $4}')"
 
 # A failed build/test leaves the current running container untouched.
 "${docker_cmd[@]}" compose build
+if [[ "$mode" == --clear-my-queries ]]; then
+    "${docker_cmd[@]}" compose stop bot
+    "${docker_cmd[@]}" compose run --rm --no-deps bot --clear-my-queries
+fi
 "${docker_cmd[@]}" compose up -d --no-build
 container_id="$("${docker_cmd[@]}" compose ps -aq bot)"
 [[ -n "$container_id" ]] || fail 'Контейнер бота не создан.'
