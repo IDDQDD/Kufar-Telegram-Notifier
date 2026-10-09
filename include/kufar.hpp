@@ -528,7 +528,8 @@ namespace Kufar {
 
     enum class SortType {
         descending = 1,
-        ascending = 2
+        ascending = 2,
+        newest = 3
     };
 
     struct KufarConfiguration {
@@ -554,6 +555,13 @@ namespace Kufar {
     };
     
     std::vector<Ad> getAds(const KufarConfiguration &);
+    struct SearchAccessResult {
+        std::string endpoint;
+        std::optional<size_t> count;
+        std::string error;
+    };
+    // Read-only connectivity probe: one small, filtered request per supported endpoint.
+    std::vector<SearchAccessResult> checkSearchAccess();
     std::optional<std::string> getPhoneNumber(
         const Ad &,
         const std::optional<std::string> &bearerToken = std::nullopt

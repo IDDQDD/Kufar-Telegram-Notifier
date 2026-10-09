@@ -227,6 +227,7 @@ namespace Telegram {
             {{"command", "add"}, {"description", u8"Создать новый запрос"}},
             {{"command", "delete"}, {"description", u8"Удалить запрос"}},
             {{"command", "status"}, {"description", u8"Проверить состояние бота"}},
+            {{"command", "check"}, {"description", u8"Проверить новые объявления сейчас"}},
             {{"command", "id"}, {"description", u8"Узнать свой Telegram ID"}},
             {{"command", "help"}, {"description", u8"Как всё работает"}}
         });

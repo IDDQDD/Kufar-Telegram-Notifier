@@ -31,16 +31,14 @@ namespace Networking {
             (void)initialized;
         }
 
-        void validateRequestResult(const CURLcode result, const long httpStatus) {
+        void validateRequestResult(const CURLcode result, const long httpStatus, const string &body) {
             if (result != CURLE_OK) {
                 throw std::runtime_error(
                     "HTTP request failed: " + string(curl_easy_strerror(result))
                 );
             }
             if (httpStatus < 200 || httpStatus >= 300) {
-                throw std::runtime_error(
-                    "HTTP request returned status " + std::to_string(httpStatus)
-                );
+                throw HTTPError(httpStatus, body);
             }
         }
     }
@@ -94,7 +92,7 @@ namespace Networking {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        validateRequestResult(result, httpStatus);
+        validateRequestResult(result, httpStatus, responseString);
         return responseString;
     }
 
@@ -132,7 +130,7 @@ namespace Networking {
         const CURLcode result = curl_easy_perform(curl.get());
         long status = 0;
         curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
-        validateRequestResult(result, status);
+        validateRequestResult(result, status, response);
         return response;
     }
 
@@ -164,7 +162,7 @@ namespace Networking {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        validateRequestResult(result, httpStatus);
+        validateRequestResult(result, httpStatus, responseString);
 
         return responseString;
     }

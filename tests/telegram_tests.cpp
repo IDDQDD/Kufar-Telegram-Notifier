@@ -35,6 +35,7 @@ int main() try {
     Telegram::setBotCommands("offline-test-token", 123);
     require(requests.size() == 2, "default and owner command menus must be registered");
     require(!requests[0].contains("scope") && hasCommand(requests[0], "id"), "everyone can discover their ID");
+    require(hasCommand(requests[0], "check"), "users can discover immediate search checking");
     for (const auto *command : {"users", "adduser", "removeuser", "backup"}) {
         require(!hasCommand(requests[0], command), "admin commands absent from default menu");
         require(hasCommand(requests[1], command), "admin commands present in owner menu");

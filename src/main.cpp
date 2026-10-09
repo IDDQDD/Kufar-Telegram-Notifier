@@ -908,6 +908,18 @@ Files getFiles(const int &argsCount, char **args) {
 }
 
 int main(int argc, char **argv) try {
+    if (argc == 2 && string(argv[1]) == "--check-kufar") {
+        bool available = false;
+        cout << "[CHECK KUFAR]: version 2.9.4; no Telegram calls or state changes" << endl;
+        for (const auto &result : checkSearchAccess()) {
+            cout << result.endpoint << ": ";
+            if (result.count) {
+                available = true;
+                cout << "OK, ads=" << *result.count << endl;
+            } else cout << result.error << endl;
+        }
+        return available ? 0 : 2;
+    }
     signal(SIGTERM, requestStop);
     signal(SIGINT, requestStop);
     ProgramConfiguration programConfiguration;
@@ -1060,6 +1072,11 @@ int main(int argc, char **argv) try {
     };
 
     map<int64_t, map<string, string>> searchErrorsByChat;
+    // Counts are from each active search's latest successful request in this process.
+    struct SearchCounts {
+        size_t received = 0, filtered = 0, seen = 0, primed = 0, sent = 0, sendErrors = 0;
+    };
+    map<int64_t, map<string, SearchCounts>> searchCountsByChat;
     map<int64_t, MenuState> menuStates;
     uint64_t subscriptionRevision = 0;
     for (const int64_t chatID : access.users()) {
@@ -1303,6 +1320,17 @@ int main(int argc, char **argv) try {
                     continue;
                 }
 
+                if (isTelegramCommand(text, "/check")) {
+                    if (subscriptionsForChat(programConfiguration, update.chatID).empty())
+                        sendMainMenu(u8"Сохранённых запросов нет. Сначала добавьте поиск.");
+                    else {
+                        ++subscriptionRevision;
+                        sendMainMenu(u8"🔎 Запущу проверку сохранённых поисков после текущего запроса.\n"
+                                     u8"Новые объявления сверю с кешем; история сохранится.");
+                    }
+                    continue;
+                }
+
                 if (isStatusCommand(text) ||
                     text == u8"ℹ️ Статус" ||
                     text == u8"📊 Состояние") {
@@ -1323,10 +1351,17 @@ int main(int argc, char **argv) try {
                             });
                         if (!active) error = searchErrors.erase(error); else ++error;
                     }
+                    const auto ownSubscriptions = subscriptionsForChat(programConfiguration, update.chatID);
+                    const bool deliveryFailed = any_of(ownSubscriptions.begin(), ownSubscriptions.end(),
+                        [&](const QuerySubscription &subscription) {
+                            const auto result = searchCountsByChat[update.chatID].find(subscription.cacheKey);
+                            return result != searchCountsByChat[update.chatID].end() && result->second.sendErrors > 0;
+                        });
                     const string heading = queryCount == 0 ? u8"⚪ ПОИСКИ НЕ НАСТРОЕНЫ" :
                         !searchErrors.empty() ? u8"⚠️ ОШИБКА ПОИСКА" :
+                        deliveryFailed ? u8"⚠️ ОШИБКА ОТПРАВКИ" :
                         lastSuccessfulCheckByChat[update.chatID] == 0 ? u8"⏳ ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ" : u8"🟢 БОТ РАБОТАЕТ";
-                    status << heading << u8" · 2.9.3\n\n"
+                    status << heading << u8" · 2.9.4\n\n"
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
@@ -1337,6 +1372,28 @@ int main(int argc, char **argv) try {
 
                     status << u8"\n🧹 Кеш: до " << programConfiguration.cacheMaxPerUser
                            << u8" объявлений; хранение " << programConfiguration.cacheRetentionDays << u8" дней без появления в выдаче.";
+                    SearchCounts totals;
+                    size_t measured = 0;
+                    for (const auto &subscription : subscriptionsForChat(programConfiguration, update.chatID)) {
+                        const auto result = searchCountsByChat[update.chatID].find(subscription.cacheKey);
+                        if (result == searchCountsByChat[update.chatID].end()) continue;
+                        ++measured;
+                        const auto &counts = result->second;
+                        totals.received += counts.received;
+                        totals.filtered += counts.filtered;
+                        totals.seen += counts.seen;
+                        totals.primed += counts.primed;
+                        totals.sent += counts.sent;
+                        totals.sendErrors += counts.sendErrors;
+                    }
+                    if (measured) {
+                        status << u8"\n📥 Последние результаты (поисков: " << measured << "/" << queryCount << ")"
+                               << u8"\nПолучено: " << totals.received << u8"; отфильтровано: " << totals.filtered
+                               << u8"; уже в кеше: " << totals.seen
+                               << u8"\nЗапомнено при первом запуске: " << totals.primed
+                               << u8"; уведомлений: " << totals.sent << u8"; ошибок отправки: " << totals.sendErrors;
+                    }
+                    if (queryCount) status << u8"\n/check — проверить сейчас, сохранив кеш.";
                     if (queryCount == 0) {
                         status << u8"\n➕ Нажмите «Новый запрос», чтобы начать мониторинг.\n"
                                << u8"Без сохранённых запросов бот не обращается к поиску Kufar.";
@@ -1707,7 +1764,10 @@ int main(int argc, char **argv) try {
             unsigned int filteredQueryTermsCount = 0;
             unsigned int filteredRequiredPhraseCount = 0;
             bool cacheChanged = false;
-            const auto &requestConfiguration = subscription.query;
+            auto requestConfiguration = subscription.query;
+            // Monitoring needs the newest page, even if a legacy query was sorted by price.
+            requestConfiguration.sortType = SortType::newest;
+            SearchCounts counts;
             const string &queryKey = subscription.cacheKey;
             RecipientCache &recipientCache = recipientCaches[subscription.chatID];
             const bool queryInitialized = find(
@@ -1719,6 +1779,7 @@ int main(int argc, char **argv) try {
             try {
                 cout << "[SEARCH]: Chat " << subscription.chatID << ", query=" << queryKey << endl;
                 const auto adverts = getAds(requestConfiguration);
+                counts.received = adverts.size();
                 for (auto advert : adverts) {
                     if (stopping) break;
                     if (advert.isDemand) {
@@ -1743,6 +1804,7 @@ int main(int argc, char **argv) try {
 
                     const string advertID = to_string(advert.id);
                     if (vectorContains(recipientCache.viewedAds, advert.id)) {
+                        ++counts.seen;
                         recipientCache.lastSeen[advertID] = time(nullptr);
                         cacheChanged = true;
                     }
@@ -1771,11 +1833,13 @@ int main(int argc, char **argv) try {
                                 sentCount += 1;
                                 usleep(300000); // Keep Telegram sends gently rate-limited.
                             } catch (const exception &exc) {
+                                ++counts.sendErrors;
                                 cerr << "[ERROR (sendAdvert)]: " << exc.what() << endl;
                             }
                         }
 
                         if (rememberAdvert) {
+                            if (!queryInitialized) ++counts.primed;
                             // Only mark a new advert as viewed after Telegram confirms delivery.
                             // Initial query priming remains silent and is stored immediately.
                             recipientCache.viewedAds.push_back(advert.id);
@@ -1820,6 +1884,7 @@ int main(int argc, char **argv) try {
                                     sentCount += 1;
                                     usleep(300000);
                                 } catch (const exception &exc) {
+                                    ++counts.sendErrors;
                                     cerr << "[ERROR (sendPriceDrop)]: " << exc.what() << endl;
                                 }
                             }
@@ -1839,9 +1904,14 @@ int main(int argc, char **argv) try {
                 }
 
                 lastSuccessfulCheckByChat[subscription.chatID] = time(nullptr);
+                counts.filtered = filteredDemandCount + filteredTitleCount + filteredQueryTermsCount + filteredRequiredPhraseCount;
+                counts.sent = sentCount;
+                searchCountsByChat[subscription.chatID][queryKey] = counts;
                 searchErrorsByChat[subscription.chatID].erase(queryKey);
                 cout << "[SEARCH OK]: Chat " << subscription.chatID << ", query=" << queryKey
-                     << ", received=" << adverts.size() << ", sent=" << sentCount << endl;
+                     << ", received=" << adverts.size() << ", filtered=" << counts.filtered
+                     << ", seen=" << counts.seen << ", primed=" << counts.primed
+                     << ", sent=" << sentCount << ", send-errors=" << counts.sendErrors << endl;
 
                 if (!queryInitialized && !stopping) {
                     recipientCache.initializedQueries.push_back(queryKey);

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <limits>
+#include <array>
 
 namespace Kufar {
 
@@ -20,7 +21,10 @@ namespace Kufar {
     using namespace Networking;
     using nlohmann::json;
 
-    const string baseURL = "https://searchapi.kufar.by/v1/search/rendered-paginated?";
+    const array<string, 2> searchEndpoints = {{
+        "https://api.kufar.by/search-api/v2/search/rendered-paginated",
+        "https://searchapi.kufar.by/v1/search/rendered-paginated"
+    }};
     const string mobilePhoneURL = "https://api.kufar.by/search-api/v1/ads/";
     const string currentPhoneURL = "https://api.kufar.by/search-api/v2/item/";
     const string DEFAULT_MAX_PRICE = "1000000000";
@@ -43,6 +47,8 @@ namespace Kufar {
     
     string getSortTypeUrlParameter(SortType sortType) {
         switch (sortType) {
+            case SortType::newest:
+                return "lst.d";
             case SortType::descending:
                 return "prc.d";
             case SortType::ascending:
@@ -184,17 +190,69 @@ namespace Kufar {
             const string phoneNumber = response.at("phone").get<string>();
             return phoneNumber.empty() ? nullopt : optional<string>(phoneNumber);
         }
+
+        json requestSearch(size_t endpoint, const string &parameters) {
+            const auto response = json::parse(getJSONFromURL(searchEndpoints.at(endpoint) + "?" + parameters,
+                {"Accept: application/json", "User-Agent: Kufar-Telegram-Notifier/2.9.4"}));
+            if (!response.is_object() || !response.contains("ads") || !response.at("ads").is_array())
+                throw runtime_error("Kufar search returned an invalid ads array");
+            return response;
+        }
+
+        string searchFailure(const exception &error) {
+            const auto *http = dynamic_cast<const HTTPError *>(&error);
+            if (http && http->status() == 403 &&
+                http->responseBody().find(u8"локации, где доступ") != string::npos)
+                return u8"HTTP 403: Kufar сообщает об ограничении доступа из локации сервера";
+            // Never print arbitrary HTTP bodies: they can contain private data or HTML.
+            if (http) return http->what();
+            if (dynamic_cast<const json::exception *>(&error)) return "Invalid Kufar JSON response";
+            return error.what();
+        }
+
+        json searchWithFallback(const string &parameters) {
+            // Keep using a working endpoint instead of retrying the rejected one for every query.
+            static size_t preferredEndpoint = 0;
+            vector<string> failures;
+            for (size_t offset = 0; offset < searchEndpoints.size(); ++offset) {
+                const size_t endpoint = (preferredEndpoint + offset) % searchEndpoints.size();
+                try {
+                    auto response = requestSearch(endpoint, parameters);
+                    preferredEndpoint = endpoint;
+                    return response;
+                } catch (const exception &error) {
+                    failures.push_back(searchEndpoints[endpoint] + ": " + searchFailure(error));
+                    cerr << "[KUFAR API]: " << failures.back() << endl;
+                }
+            }
+            ostringstream message;
+            message << u8"Kufar: оба адреса поиска недоступны. ";
+            for (const auto &failure : failures) message << failure << "; ";
+            throw runtime_error(message.str());
+        }
     
+    }
+
+    vector<SearchAccessResult> checkSearchAccess() {
+        vector<SearchAccessResult> results;
+        const string parameters = "query=" + urlEncode(u8"книга") + "&size=1&sort=lst.d";
+        for (size_t endpoint = 0; endpoint < searchEndpoints.size(); ++endpoint) {
+            SearchAccessResult result{searchEndpoints[endpoint], nullopt, {}};
+            try { result.count = requestSearch(endpoint, parameters).at("ads").size(); }
+            catch (const exception &error) { result.error = searchFailure(error); }
+            results.push_back(result);
+        }
+        return results;
     }
 
     vector<Ad> getAds(const KufarConfiguration &configuration) {
         vector<Ad> adverts;
         ostringstream urlStream;
-        urlStream << baseURL;
         
         addURLParameter(urlStream, "query", configuration.tag, true);
         addURLParameter(urlStream, "lang", configuration.language);
-        addURLParameter(urlStream, "size", configuration.limit);
+        if (configuration.limit && *configuration.limit <= 0) throw runtime_error("Invalid Kufar search limit");
+        addURLParameter(urlStream, "size", to_string(min(configuration.limit.value_or(30), 200)));
         addURLParameter(urlStream, "prc", configuration.priceRange.joinPrice());
         addURLParameter(urlStream, "cur", configuration.currency);
         addURLParameter(urlStream, "cat", configuration.subCategory);
@@ -208,7 +266,7 @@ namespace Kufar {
         addURLParameterBoolean(urlStream, "ovi", configuration.onlyWithVideos);
         addURLParameterBoolean(urlStream, "pse", configuration.onlyWithExchangeAvailable);
         
-        if (configuration.sortType.has_value()) { addURLParameter(urlStream, "sort", getSortTypeUrlParameter(configuration.sortType.value())); }
+        addURLParameter(urlStream, "sort", getSortTypeUrlParameter(configuration.sortType.value_or(SortType::newest)));
         if (configuration.condition.has_value()) { addURLParameter(urlStream, "cnd", int(configuration.condition.value())); }
         if (configuration.sellerType.has_value()) {
             addURLParameter(urlStream, "cmp", to_string(int(configuration.sellerType.value())));
@@ -216,17 +274,7 @@ namespace Kufar {
         if (configuration.region.has_value()) { addURLParameter(urlStream, "rgn", int(configuration.region.value())); }
         if (configuration.areas.has_value()) { addURLParameter(urlStream, "ar", "v.or:" + joinIntVector(configuration.areas.value(), ",")); }
             
-        string rawJson;
-        try {
-            rawJson = getJSONFromURL(urlStream.str());
-        } catch (const exception &exc) {
-            if (string(exc.what()).find("status 403") != string::npos)
-                throw runtime_error(u8"Kufar HTTP 403: доступ к поиску запрещён. Проверьте доступ к Kufar с IP сервера и его локацию.");
-            throw;
-        }
-        const json response = json::parse(rawJson);
-        if (!response.is_object() || !response.contains("ads") || !response.at("ads").is_array())
-            throw runtime_error("Kufar search returned an invalid ads array");
+        const json response = searchWithFallback(urlStream.str());
         const json &ads = response.at("ads");
         size_t skipped = 0;
 
@@ -321,6 +369,8 @@ namespace Kufar {
     namespace EnumString {
         string sortType(SortType sortType) {
             switch (sortType) {
+                case SortType::newest:
+                    return "Сначала новые";
                 case SortType::descending:
                     return "По убыванию";
                 case SortType::ascending:
