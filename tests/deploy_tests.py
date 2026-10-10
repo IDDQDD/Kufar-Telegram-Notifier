@@ -13,7 +13,7 @@ class DeployTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="kufar-deploy-test-")
         self.project = Path(self.temp.name).resolve()
         assert self.project.parent == Path(tempfile.gettempdir()).resolve()
-        for name in ("deploy.sh", "compose.yaml", "Dockerfile", ".env.example", "kufar-configuration.json"):
+        for name in ("deploy.sh", "update.sh", "compose.yaml", "Dockerfile", ".env.example", "kufar-configuration.json", "kufar-proxies.txt"):
             shutil.copyfile(self.source / name, self.project / name)
         self.mock = self.project / "mock-bin"
         self.mock.mkdir()
@@ -55,6 +55,58 @@ esac
     def prepare(self):
         result = self.run_deploy("--prepare")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def run_update(self, *arguments):
+        return subprocess.run(
+            [self.bash, "update.sh", *arguments], cwd=self.project,
+            env=self.env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+        )
+
+    def test_netherlands_update_replaces_primary_and_overrides_preserving_other_settings(self):
+        self.prepare()
+        other = 'TELEGRAM_BOT_TOKEN="offline-test-secret"\nKEEP_SETTINGS=yes\n'
+        original = (other + "KUFAR_PROXY='socks4://86.57.178.182:4153'\n"
+                    "KUFAR_PROXY_POOL=http://178.124.195.80:8080\n"
+                    "export KUFAR_PROXY_POOL_FILE = '/data/old-proxies.txt'\n"
+                    "KUFAR_PROXY=http://178.124.91.214:8080\n")
+        (self.project / ".env").write_text(original, encoding="utf-8")
+        cache = self.project / "data" / "cached-data.json"
+        cache.write_text('{"keep":"history"}', encoding="utf-8")
+        result = self.run_update("--netherlands-proxies")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        updated = (self.project / ".env").read_text()
+        self.assertTrue(updated.startswith(other))
+        self.assertEqual(updated.count("KUFAR_PROXY="), 1)
+        self.assertIn("KUFAR_PROXY=http://85.209.156.148:1080\n", updated)
+        self.assertNotIn("KUFAR_PROXY_POOL", updated)
+        self.assertNotIn("178.124", updated)
+        self.assertNotIn("86.57", updated)
+        self.assertNotIn("offline-test-secret", result.stdout + result.stderr)
+        self.assertEqual(cache.read_text(), '{"keep":"history"}')
+        backups = list(self.project.glob(".env.before-netherlands.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), original)
+        self.assertFalse(list(self.project.glob(".env.netherlands.*")))
+
+    def test_normal_update_preserves_existing_proxy_settings(self):
+        self.prepare()
+        original = "KUFAR_PROXY=http://private-proxy:8080\nKUFAR_PROXY_POOL=\n"
+        (self.project / ".env").write_text(original, encoding="utf-8")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.project / ".env").read_text(), original)
+        self.assertFalse(list(self.project.glob(".env.before-netherlands.*")))
+
+    def test_netherlands_update_rejects_missing_env_or_extra_arguments(self):
+        result = self.run_update("--netherlands-proxies")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.project / ".env").exists())
+        self.prepare()
+        original = (self.project / ".env").read_bytes()
+        result = self.run_update("--netherlands-proxies", "--unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.project / ".env").read_bytes(), original)
 
     def test_prepare_preserves_settings_and_cache(self):
         self.prepare()

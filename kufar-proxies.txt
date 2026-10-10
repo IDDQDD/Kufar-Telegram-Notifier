@@ -1,5 +1,5 @@
-# Reserve proxies supplied by the owner. KUFAR_PROXY is tried first.
-socks4://86.57.178.182:4153
-http://178.124.195.80:8080
-http://178.124.91.214:8080
-http://80.249.81.179:9050
+# Netherlands proxies that returned Kufar ads. Public proxies may be unreliable.
+# KUFAR_PROXY is tried first; duplicate URLs are removed.
+http://85.209.156.148:1080
+socks5h://5.255.99.75:1080
+socks5h://213.176.74.119:1080
