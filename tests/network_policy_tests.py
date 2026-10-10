@@ -119,6 +119,15 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.destinations, ["api.kufar.by:443"])
         self.assertNotIn("private-test-secret", result.stdout + result.stderr)
 
+    def test_unreachable_proxy_is_a_connection_failure_only_for_kufar(self):
+        for scheme in ("http", "socks4a", "socks5h"):
+            with self.subTest(scheme=scheme):
+                proxy = f"{scheme}://127.0.0.1:1"
+                result = self.run_probe("https://api.kufar.by/search", KUFAR_PROXY=proxy, NO_PROXY="*")
+                self.assertIn("Proxy connection failed:", result.stderr)
+                result = self.run_probe("https://api.telegram.org/botoffline/getUpdates", KUFAR_PROXY=proxy)
+                self.assertNotIn("Proxy connection failed:", result.stderr)
+
     def test_unset_proxy_keeps_existing_routing_and_invalid_value_is_not_echoed(self):
         self.run_probe("https://api.kufar.by/search", KUFAR_PROXY="")
         self.assertEqual(self.destinations, [])

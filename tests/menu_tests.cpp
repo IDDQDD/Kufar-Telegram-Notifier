@@ -17,6 +17,10 @@ int sendFailuresRemaining = 0;
 bool probeTest = false;
 bool probeFailure = false;
 bool overlappingSearches = false;
+bool proxyTest = false;
+vector<int> proxyOutcomes; // 0: success, 1: proxy transport failure, 2: Kufar HTTP 403.
+vector<size_t> proxyAlertAttempts;
+int proxyAlertSendFailures = 0;
 void require(bool condition, const char *message) {
     if (!condition) throw runtime_error(message);
 }
@@ -40,6 +44,12 @@ string getJSONFromURL(const string &url) {
         require(url.find(u8"query=Гиря") != string::npos && url.find("size=30") != string::npos &&
                 url.find("sort=lst.d") != string::npos,
                 "monitoring must request a bounded result page for the saved search");
+        if (proxyTest) {
+            const int outcome = proxyOutcomes.at(nextBatch - 1);
+            if (outcome == 1) throw ProxyError("Offline proxy connection failed");
+            if (outcome == 2) throw HTTPError(403, "Forbidden");
+            return R"({"ads":[]})";
+        }
         if (searchFailuresRemaining > 0) {
             --searchFailuresRemaining;
             throw HTTPError(403, "Forbidden");
@@ -73,6 +83,14 @@ string postJSONToURL(const string &url, const string &body) {
     require(!probeTest, "standalone probe must never contact Telegram");
     if (url.find("/sendMessage") != string::npos) {
         const auto request = json::parse(body);
+        if (proxyTest && request.at("text").get<string>().find(u8"⚠️ Не удаётся подключиться к Kufar через настроенный прокси") == 0) {
+            require(request.at("chat_id") == 123, "proxy outage alerts go only to the owner");
+            proxyAlertAttempts.push_back(nextBatch - 1);
+            if (proxyAlertSendFailures > 0) {
+                --proxyAlertSendFailures;
+                return R"({"ok":false,"description":"Offline alert send failure"})";
+            }
+        }
         const auto persisted = getJSONDataFromPath(statePath);
         if (!request.contains("parse_mode")) {
             require(persisted.at("telegram-update-offset").get<int64_t>() > 0 &&
@@ -94,10 +112,135 @@ string postDocumentToURL(const string &, int64_t, const string &, const string &
 }
 }
 
+void testUserManagement(const filesystem::path &directory) {
+    const auto previousPath = statePath;
+    const auto previousOffset = expectedOffset;
+    statePath = (directory / "users-cache.json").string();
+    const auto configPath = (directory / "users-config.json").string();
+    saveFile(statePath, json{{"user-access", {{"777", true}}}}.dump());
+    saveFile(configPath, json{{"telegram", {{"bot-token", "offline-test-token"}, {"chat-id", 123}}},
+        {"queries", json::array()}, {"recipients", {
+            {{"chat-id", 123}, {"queries", json::array()}},
+            {{"chat-id", 456}, {"queries", {{{"tag", u8"Гиря"}}}}}
+        }}}.dump());
+    vector<string> arguments = {"offline-test", "--config=" + configPath, "--cache=" + statePath};
+    vector<char *> argv;
+    for (auto &argument : arguments) argv.push_back(argument.data());
+    const auto run = [&](int64_t offset, const json &updates) {
+        incoming = updates;
+        expectedOffset = offset;
+        replies.clear();
+        stopping = 0;
+        require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "user management run failed");
+    };
+    run(0, json::array({message(1, 1, u8"/adduser 456 Олег"),
+        message(2, 2, u8"/adduser 789 Мария Иванова"), message(3, 3, u8"➕ Добавить пользователя"),
+        message(4, 4, u8"790 Алексей 🚀"), message(5, 5, "/adduser 791"), message(6, 6, "/users")}));
+    require(replies.size() == 6, "each user action receives one response");
+    require(replies.back().at("text").get<string>().find(u8"789 · Мария Иванова") != string::npos &&
+            replies.back().at("text").get<string>().find(u8"790 · Алексей 🚀") != string::npos,
+            "command and button additions display names alongside IDs");
+    require(getJSONDataFromPath(statePath).at("user-names").at("789") == u8"Мария Иванова", "names saved before acknowledgment");
+    run(7, json::array({message(7, 7, "/users")}));
+    require(replies.back().at("text").get<string>().find(u8"789 · Мария Иванова") != string::npos &&
+            replies.back().at("text").get<string>().find("777\n") != string::npos &&
+            replies.back().at("text").get<string>().find("791\n") != string::npos,
+            "names, legacy users and ID-only additions survive restart");
+    auto unauthorized = message(11, 11, u8"/adduser 789 Чужое имя");
+    unauthorized["message"]["chat"]["id"] = 456;
+    unauthorized["message"]["from"]["id"] = 456;
+    run(8, json::array({message(8, 8, u8"/adduser 456 Олег Петров"),
+        message(9, 9, u8"/removeuser 789 Мария Иванова"), message(10, 10, "/users"),
+        unauthorized, message(12, 12, "/users")}));
+    require(replies[1].at("text").get<string>().find(u8"только положительный числовой ID") != string::npos,
+            "remove command rejects names instead of deleting by a parsed prefix");
+    require(replies[3].at("text") == u8"Это действие доступно только владельцу.", "ordinary users cannot change names");
+    require(getJSONDataFromPath(statePath).at("user-names").at("789") == u8"Мария Иванова" &&
+            getJSONDataFromPath(statePath).at("user-names").at("456") == u8"Олег Петров",
+            "rename persists while rejected removal and non-owner changes have no effect");
+    run(13, json::array({message(13, 13, u8"🚫 Отключить пользователя"),
+        message(14, 14, u8"789 Мария Иванова"), message(15, 15, "789"), message(16, 16, u8"↩️ Отмена"),
+        message(17, 17, "/removeuser 789"), message(18, 18, u8"✅ Да, отключить"), message(19, 19, "/users")}));
+    require(replies[1].at("text").get<string>().find(u8"только положительный числовой ID") != string::npos &&
+            replies[2].at("text").get<string>().find(u8"789 · Мария Иванова") != string::npos,
+            "button removal accepts only ID and shows the name in confirmation");
+    require(!getJSONDataFromPath(statePath).at("user-names").contains("789"), "confirmed removal forgets the name");
+    run(20, json::array({message(20, 20, "/users"), message(21, 21, "/queries")}));
+    require(replies[0].at("text").get<string>().find("\n789") == string::npos &&
+            replies[0].at("text").get<string>().find(u8"456 · Олег Петров") != string::npos,
+            "removed users stay removed and another user's name is retained");
+    statePath = previousPath;
+    expectedOffset = previousOffset;
+}
+
+void testProxyNotifications(const filesystem::path &directory) {
+    const auto previousPath = statePath;
+    const auto previousOffset = expectedOffset;
+    const char *previousProxy = getenv("KUFAR_PROXY");
+    const optional<string> originalProxy = previousProxy ? optional<string>(previousProxy) : nullopt;
+    const auto setProxy = [](const optional<string> &value) {
+#ifdef _WIN32
+        _putenv_s("KUFAR_PROXY", value ? value->c_str() : "");
+#else
+        if (value) setenv("KUFAR_PROXY", value->c_str(), 1);
+        else unsetenv("KUFAR_PROXY");
+#endif
+    };
+    const auto configPath = (directory / "proxy-config.json").string();
+    saveFile(configPath, json{{"telegram", {{"bot-token", "offline-test-token"}, {"chat-id", 123}}},
+        {"queries", json::array()}, {"recipients", {
+            {{"chat-id", 456}, {"queries", {{{"tag", u8"Гиря"}}}}}
+        }}, {"delays", {{"query", 0}, {"loop", 0}}}}.dump());
+    const auto run = [&](const char *cacheName, const vector<int> &outcomes, bool fresh) {
+        statePath = (directory / cacheName).string();
+        if (fresh) saveFile(statePath, "[]");
+        const auto state = getJSONDataFromPath(statePath);
+        expectedOffset = state.is_object() ? state.value("telegram-update-offset", int64_t{0}) : 0;
+        const auto messageID = state.is_object() && state.contains("telegram-message-ids")
+            ? state.at("telegram-message-ids").value("123", int64_t{0}) + 1 : 1;
+        proxyOutcomes = outcomes;
+        proxyAlertAttempts.clear();
+        batches.assign(outcomes.size() + 1, json::array());
+        batches[0] = json::array({message(expectedOffset, messageID, "/menu")});
+        nextBatch = 0;
+        scheduleTest = proxyTest = true;
+        replies.clear();
+        stopping = 0;
+        vector<string> arguments = {"offline-test", "--config=" + configPath, "--cache=" + statePath};
+        vector<char *> argv;
+        for (auto &argument : arguments) argv.push_back(argument.data());
+        require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "proxy alert run failed");
+        scheduleTest = proxyTest = false;
+    };
+    setProxy(string("socks4://offline-proxy.invalid:4153"));
+    run("proxy-cache.json", {1, 1, 1, 1, 0, 1, 1, 1, 1}, true);
+    require(proxyAlertAttempts == vector<size_t>({2, 7}), "alert on third failed search, suppress repeats, reset after recovery");
+    require(getJSONDataFromPath(statePath).at("proxy-health").at("notified") == true, "outage acknowledgment persisted");
+    run("proxy-cache.json", {1, 1, 1}, false);
+    require(proxyAlertAttempts.empty(), "restart during the same outage must not resend its alert");
+    run("proxy-http-cache.json", {1, 1, 2, 1, 1}, true);
+    require(proxyAlertAttempts.empty(), "Kufar HTTP 403 does not count as proxy unavailability");
+    proxyAlertSendFailures = 1;
+    run("proxy-send-cache.json", {1, 1, 1, 1, 1}, true);
+    require(proxyAlertAttempts == vector<size_t>({2, 3}) && proxyAlertSendFailures == 0 &&
+            getJSONDataFromPath(statePath).at("proxy-health").at("notified") == true,
+            "failed Telegram alert is retried and only acknowledged on confirmed delivery");
+    setProxy(nullopt);
+    run("direct-cache.json", {1, 1, 1, 1}, true);
+    require(proxyAlertAttempts.empty(), "no proxy setting means no proxy notifications");
+    setProxy(originalProxy);
+    nextBatch = 0;
+    replies.clear();
+    statePath = previousPath;
+    expectedOffset = previousOffset;
+}
+
 int main() try {
     const auto directory = filesystem::temp_directory_path() /
         ("kufar-menu-test-" + to_string(chrono::system_clock::now().time_since_epoch().count()));
     filesystem::create_directory(directory);
+    testUserManagement(directory);
+    testProxyNotifications(directory);
     statePath = (directory / "cache.json").string();
     const auto configPath = (directory / "config.json").string();
     saveFile(statePath, "[]");
@@ -119,7 +262,7 @@ int main() try {
             "category selected once despite repeated delivery");
     require(replies[4].at("text").get<string>().find(u8"Пока ничего не выбрано") != string::npos,
             "a new click can deselect the same category");
-    require(replies.back().at("text").get<string>().find("2.9.6") != string::npos, "status identifies updated code");
+    require(replies.back().at("text").get<string>().find("2.9.7") != string::npos, "status identifies updated code");
     require(replies.back().at("text").get<string>().find(u8"ПОИСКИ НЕ НАСТРОЕНЫ") != string::npos &&
             replies.back().at("text").get<string>().find(u8"Последняя проверка: поисков нет") != string::npos,
             "an empty query list must explain that monitoring is idle");

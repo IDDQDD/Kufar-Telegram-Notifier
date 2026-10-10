@@ -28,6 +28,9 @@
 #include "networking.hpp"
 #include "helperfunctions.hpp"
 #include "lifecycle.hpp"
+#include "proxyhealth.hpp"
+#include "usermenu.hpp"
+#include "version.hpp"
 #include "querygrouping.hpp"
 #include "statelock.hpp"
 
@@ -322,6 +325,25 @@ optional<string> commandArgument(const string &text, const string &command) {
     const auto separator = text.find_first_of(" \t\r\n");
     if (!isTelegramCommand(text.substr(0, separator), command)) return nullopt;
     return separator == string::npos ? string{} : trimText(text.substr(separator));
+}
+
+template<typename Persist>
+void sendPendingProxyAlert(Lifecycle::ProxyHealth &health, const TelegramConfiguration &configuration,
+                           int64_t ownerID, const Persist &persist) {
+    if (!health.pending()) return;
+    try {
+        auto ownerConfiguration = configuration;
+        ownerConfiguration.chatID = ownerID;
+        sendTextMessage(ownerConfiguration,
+            u8"⚠️ Не удаётся подключиться к Kufar через настроенный прокси: 3 попытки поиска подряд завершились ошибкой соединения.\n"
+            u8"Мониторинг продолжит попытки по расписанию. Проверьте прокси и соединение VPS; подробности — в /status и логах.");
+        health.notified = true;
+        persist();
+    } catch (const StorageError &) {
+        throw;
+    } catch (const exception &error) {
+        cerr << "[ERROR (proxy alert)]: " << error.what() << endl;
+    }
 }
 
 const vector<CategoryChoice> &categoryChoices() {
@@ -713,7 +735,10 @@ json makeBackupConfiguration(const ProgramConfiguration &configuration) {
         for (const auto &subscription : configuration.subscriptions) {
             if (subscription.chatID == id) queries.push_back(subscription.sourceQuery);
         }
-        recipients.push_back({{"chat-id", id}, {"queries", queries}});
+        json recipient = {{"chat-id", id}, {"queries", queries}};
+        const auto name = configuration.access.names.find(id);
+        if (name != configuration.access.names.end()) recipient["name"] = name->second;
+        recipients.push_back(recipient);
     }
     // Construct from an allowlist: never copy tokens or arbitrary environment variables.
     return {{"telegram", {{"bot-token", ""}, {"chat-id", configuration.access.owner}}},
@@ -758,7 +783,11 @@ void loadJSONConfigurationData(const json &data, ProgramConfiguration &programCo
         if (recipientsJSON || data.contains("recipients")) {
             const json recipients = recipientsJSON ? json::parse(recipientsJSON) : data.at("recipients");
             for (const json &recipient : recipients) {
-                addSubscriptions(recipient.at("chat-id").get<int64_t>(), recipient.at("queries"));
+                const auto id = recipient.at("chat-id").get<int64_t>();
+                addSubscriptions(id, recipient.at("queries"));
+                if (recipient.contains("name") &&
+                    !programConfiguration.access.setName(programConfiguration.access.owner, id, recipient.at("name").get<string>()))
+                    throw runtime_error("Invalid configured user name");
             }
         } else {
             addSubscriptions(programConfiguration.telegramConfiguration.chatID, queriesData);
@@ -910,7 +939,7 @@ Files getFiles(const int &argsCount, char **args) {
 int main(int argc, char **argv) try {
     if (argc == 2 && string(argv[1]) == "--check-kufar") {
         bool available = false;
-        cout << "[CHECK KUFAR]: version 2.9.6; no Telegram calls or state changes" << endl;
+        cout << "[CHECK KUFAR]: version " << Application::version << "; no Telegram calls or state changes" << endl;
         const char *proxy = getenv("KUFAR_PROXY");
         cout << "[CHECK KUFAR]: KUFAR_PROXY=" << (proxy && *proxy ? "configured" : "not configured") << endl;
         for (const auto &result : checkSearchAccess()) {
@@ -947,6 +976,8 @@ int main(int argc, char **argv) try {
     if (programConfiguration.files.cache.contents.is_object()) {
         queryOverrides = programConfiguration.files.cache.contents.value("query-overrides", json::object());
         access.load(programConfiguration.files.cache.contents.value("user-access", json::object()));
+        if (programConfiguration.files.cache.contents.contains("user-names"))
+            access.loadNames(programConfiguration.files.cache.contents.at("user-names"));
     }
     applyQueryOverrides(programConfiguration, queryOverrides);
     programConfiguration.subscriptions.erase(remove_if(programConfiguration.subscriptions.begin(),
@@ -1040,6 +1071,11 @@ int main(int argc, char **argv) try {
             if (id && access.allows(*id) && timestamp > 0) lastSuccessfulCheckByChat[*id] = timestamp;
         }
     }
+    Lifecycle::ProxyHealth proxyHealth;
+    const char *configuredProxy = getenv("KUFAR_PROXY");
+    proxyHealth.configure(configuredProxy ? configuredProxy : "");
+    if (programConfiguration.files.cache.contents.is_object())
+        proxyHealth.load(programConfiguration.files.cache.contents.value("proxy-health", json::object()));
     string lastSavedState;
     const auto saveCache = [&]() {
         access.compact();
@@ -1078,6 +1114,8 @@ int main(int argc, char **argv) try {
             {"telegram-message-ids", telegramMessageIDs},
             {"last-successful-checks", successfulChecks},
             {"user-access", access.save()},
+            {"user-names", access.saveNames()},
+            {"proxy-health", proxyHealth.save()},
             {"completed-backup-request", completedBackupRequest},
             {"query-overrides", queryOverrides}
         };
@@ -1190,12 +1228,10 @@ int main(int argc, char **argv) try {
                 if (isTelegramCommand(text, "/users") || text == u8"👥 Пользователи") {
                     if (!isOwner) { sendMainMenu(u8"Управление пользователями доступно только владельцу."); continue; }
                     menuState = MenuState{};
-                    string list = u8"👥 Пользователи\n\n";
-                    for (const auto id : access.users()) {
-                        list += to_string(id) + (id == access.owner ? u8" · владелец" : "") + "\n";
-                    }
-                    list += u8"\nНовый пользователь пишет боту /start и передаёт вам свой ID.";
-                    sendTextMessageWithKeyboard(telegramConfiguration, list,
+                    const auto pages = UserMenu::pages(access);
+                    for (size_t index = 0; index + 1 < pages.size(); ++index)
+                        sendTextMessage(telegramConfiguration, pages[index]);
+                    sendTextMessageWithKeyboard(telegramConfiguration, pages.back(),
                         {{u8"➕ Добавить пользователя"}, {u8"🚫 Отключить пользователя"}, {u8"💾 Резервная копия"}, {u8"🏠 Главное меню"}});
                     continue;
                 }
@@ -1211,29 +1247,43 @@ int main(int argc, char **argv) try {
                     userIDText = addUserArgument.value_or(removeUserArgument.value_or(""));
                     if (userIDText.empty()) {
                         sendTextMessageWithKeyboard(telegramConfiguration,
-                            u8"🪪 Отправьте числовой Telegram ID пользователя. Его можно узнать командой /id у этого бота.",
+                            menuState.step == MenuStep::waitingForUserAdd
+                                ? u8"🪪 Отправьте Telegram ID и, при желании, имя: 123456789 Иван Петров. Имя — до 80 символов, в одну строку. ID можно узнать командой /id у этого бота."
+                                : u8"🪪 Отправьте только числовой Telegram ID пользователя, без имени. Его можно узнать командой /id у этого бота.",
                             {{u8"↩️ Отмена"}});
                         continue;
                     }
                 }
                 if (isOwner && (menuState.step == MenuStep::waitingForUserAdd || menuState.step == MenuStep::waitingForUserRemove)) {
-                    const auto target = Lifecycle::parseUserID(userIDText);
-                    if (!target) { sendTextMessage(telegramConfiguration, u8"Нужен положительный числовой ID, без @ и пробелов."); continue; }
+                    const bool adding = menuState.step == MenuStep::waitingForUserAdd;
+                    const auto addition = adding ? Lifecycle::parseUserAddition(userIDText) : nullopt;
+                    const auto target = adding ? (addition ? optional<int64_t>(addition->id) : nullopt)
+                                               : Lifecycle::parseUserID(userIDText);
+                    if (!target) {
+                        sendTextMessage(telegramConfiguration, adding
+                            ? u8"Отправьте числовой ID и необязательное имя до 80 символов в одну строку. Например: 123456789 Иван Петров."
+                            : u8"Для удаления нужен только положительный числовой ID, без имени, @ и пробелов.");
+                        continue;
+                    }
                     if (*target == access.owner) { sendMainMenu(u8"Владелец уже подключён, отключить себя нельзя."); menuState = MenuState{}; continue; }
                     if (menuState.step == MenuStep::waitingForUserAdd) {
-                        if (access.allows(*target)) { sendMainMenu(u8"Пользователь уже подключён."); menuState = MenuState{}; continue; }
-                        if (access.users().size() >= 100) { sendMainMenu(u8"Достигнут лимит 100 пользователей."); menuState = MenuState{}; continue; }
-                        const auto oldAccess = access.overrides;
+                        const bool alreadyAllowed = access.allows(*target);
+                        if (alreadyAllowed && addition->name.empty()) { sendMainMenu(u8"Пользователь уже подключён."); menuState = MenuState{}; continue; }
+                        if (!alreadyAllowed && access.users().size() >= 100) { sendMainMenu(u8"Достигнут лимит 100 пользователей."); menuState = MenuState{}; continue; }
+                        const auto oldAccess = access;
                         access.change(update.chatID, *target, true);
-                        try { saveCache(); } catch (...) { access.overrides = oldAccess; throw; }
+                        if (!addition->name.empty()) access.setName(update.chatID, *target, addition->name);
+                        try { saveCache(); } catch (...) { access = oldAccess; throw; }
                         menuState = MenuState{};
-                        sendMainMenu(u8"✅ Пользователь " + to_string(*target) + u8" подключён. Пусть отправит /menu и добавит свои запросы.");
+                        sendMainMenu(alreadyAllowed
+                            ? u8"✅ Имя пользователя сохранено: " + UserMenu::label(access, *target) + "."
+                            : u8"✅ Пользователь " + UserMenu::label(access, *target) + u8" подключён. Пусть отправит /menu и добавит свои запросы.");
                     } else {
                         if (!access.allows(*target)) { sendMainMenu(u8"Пользователь не подключён."); menuState = MenuState{}; continue; }
                         menuState.pendingUserID = *target;
                         menuState.step = MenuStep::waitingForUserRemoveConfirmation;
                         sendTextMessageWithKeyboard(telegramConfiguration,
-                            u8"Отключить пользователя " + to_string(*target) +
+                            u8"Отключить пользователя " + UserMenu::label(access, *target) +
                             u8"? Его запросы и кеш будут удалены. Ваши запросы останутся на месте.",
                             {{u8"✅ Да, отключить"}, {u8"↩️ Отмена"}});
                     }
@@ -1242,7 +1292,7 @@ int main(int argc, char **argv) try {
                 if (isOwner && menuState.step == MenuStep::waitingForUserRemoveConfirmation) {
                     if (text != u8"✅ Да, отключить") { sendTextMessage(telegramConfiguration, u8"Подтвердите кнопкой или нажмите «Отмена»."); continue; }
                     const int64_t target = menuState.pendingUserID;
-                    const auto oldAccess = access.overrides;
+                    const auto oldAccess = access;
                     const auto oldQueries = programConfiguration.subscriptions;
                     const auto oldOverrides = queryOverrides;
                     const auto oldCaches = recipientCaches;
@@ -1253,7 +1303,7 @@ int main(int argc, char **argv) try {
                     queryOverrides[to_string(target)] = json::array();
                     recipientCaches.erase(target);
                     try { saveCache(); } catch (...) {
-                        access.overrides = oldAccess; queries = oldQueries;
+                        access = oldAccess; queries = oldQueries;
                         queryOverrides = oldOverrides; recipientCaches = oldCaches; throw;
                     }
                     menuStates.erase(target);
@@ -1378,7 +1428,7 @@ int main(int argc, char **argv) try {
                         !searchErrors.empty() ? u8"⚠️ ОШИБКА ПОИСКА" :
                         deliveryFailed ? u8"⚠️ ОШИБКА ОТПРАВКИ" :
                         lastSuccessfulCheckByChat[update.chatID] == 0 ? u8"⏳ ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ" : u8"🟢 БОТ РАБОТАЕТ";
-                    status << heading << u8" · 2.9.6\n\n"
+                    status << heading << u8" · " << Application::version << "\n\n"
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "
@@ -1781,6 +1831,8 @@ int main(int argc, char **argv) try {
             unsigned int filteredQueryTermsCount = 0;
             unsigned int filteredRequiredPhraseCount = 0;
             bool cacheChanged = false;
+            const int previousProxyFailures = proxyHealth.failures;
+            const bool previousProxyNotified = proxyHealth.notified;
             auto requestConfiguration = subscription.query;
             // Monitoring needs the newest page, even if a legacy query was sorted by price.
             requestConfiguration.sortType = SortType::newest;
@@ -1796,6 +1848,7 @@ int main(int argc, char **argv) try {
             try {
                 cout << "[SEARCH]: Chat " << subscription.chatID << ", query=" << queryKey << endl;
                 const auto adverts = getAds(requestConfiguration);
+                proxyHealth.reset();
                 counts.received = adverts.size();
                 for (auto advert : adverts) {
                     if (stopping) break;
@@ -1943,6 +1996,8 @@ int main(int argc, char **argv) try {
                     cout << "[CACHE]: Initial listings stored without Telegram notifications for chat " << subscription.chatID << ", query: " << queryKey << endl;
                 }
             } catch (const exception &exc) {
+                if (dynamic_cast<const Networking::ProxyError *>(&exc)) proxyHealth.failed();
+                else proxyHealth.reset();
                 searchErrorsByChat[subscription.chatID][queryKey] = exc.what();
                 cerr << "[ERROR (getAds)]: Chat " << subscription.chatID << ", query=" << queryKey
                      << ", " << exc.what() << endl;
@@ -1957,9 +2012,10 @@ int main(int argc, char **argv) try {
                      << ", required=" << filteredRequiredPhraseCount << endl;
             }
 
-            if (cacheChanged || sentCount > 0) {
-                saveCache();
-            }
+            // Keep the consecutive failures and alert status across restarts.
+            if (cacheChanged || sentCount > 0 || previousProxyFailures != proxyHealth.failures ||
+                previousProxyNotified != proxyHealth.notified) saveCache();
+            sendPendingProxyAlert(proxyHealth, programConfiguration.telegramConfiguration, access.owner, saveCache);
 
             pollBotCommands();
             sleepWithStatusPolling(programConfiguration.queryDelaySeconds, cycleRevision);

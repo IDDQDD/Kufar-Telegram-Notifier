@@ -8,6 +8,7 @@
 #include "json.hpp"
 #include "kufar.hpp"
 #include "networking.hpp"
+#include "version.hpp"
 #include "helperfunctions.hpp"
 #include <iostream>
 #include <algorithm>
@@ -193,7 +194,7 @@ namespace Kufar {
 
         json requestSearch(size_t endpoint, const string &parameters) {
             const auto response = json::parse(getJSONFromURL(searchEndpoints.at(endpoint) + "?" + parameters,
-                {"Accept: application/json", "User-Agent: Kufar-Telegram-Notifier/2.9.6"}));
+                {"Accept: application/json", string("User-Agent: Kufar-Telegram-Notifier/") + Application::version}));
             if (!response.is_object() || !response.contains("ads") || !response.at("ads").is_array())
                 throw runtime_error("Kufar search returned an invalid ads array");
             return response;
@@ -214,6 +215,7 @@ namespace Kufar {
             // Keep using a working endpoint instead of retrying the rejected one for every query.
             static size_t preferredEndpoint = 0;
             vector<string> failures;
+            bool allProxyFailures = true;
             for (size_t offset = 0; offset < searchEndpoints.size(); ++offset) {
                 const size_t endpoint = (preferredEndpoint + offset) % searchEndpoints.size();
                 try {
@@ -221,6 +223,7 @@ namespace Kufar {
                     preferredEndpoint = endpoint;
                     return response;
                 } catch (const exception &error) {
+                    allProxyFailures = allProxyFailures && dynamic_cast<const Networking::ProxyError *>(&error);
                     failures.push_back(searchEndpoints[endpoint] + ": " + searchFailure(error));
                     cerr << "[KUFAR API]: " << failures.back() << endl;
                 }
@@ -228,6 +231,7 @@ namespace Kufar {
             ostringstream message;
             message << u8"Kufar: оба адреса поиска недоступны. ";
             for (const auto &failure : failures) message << failure << "; ";
+            if (allProxyFailures) throw Networking::ProxyError(message.str());
             throw runtime_error(message.str());
         }
     

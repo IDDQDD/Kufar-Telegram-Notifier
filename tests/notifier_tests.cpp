@@ -404,6 +404,7 @@ int main() {
         configuration.access.owner = 123;
         configuration.access.initial = {123, 456, 789};
         configuration.access.change(123, 789, false);
+        configuration.access.setName(123, 456, u8"Иван Петров");
         configuration.subscriptions = {
             makeSubscription(123, {{"tag", u8"СССР"}}),
             makeSubscription(456, {{"tag", u8"гиря"}, {"category", 4000}})
@@ -416,6 +417,29 @@ int main() {
                 "backup retains query filters");
         require(backup.at("recipients")[0].at("queries")[0].at("tag") == u8"СССР",
                 "backup retains owner searches");
+        require(backup.at("recipients")[1].at("name") == u8"Иван Петров", "backup retains user names");
+        ProgramConfiguration restored;
+        loadJSONConfigurationData(backup, restored);
+        require(restored.access.names.at(456) == u8"Иван Петров" && restored.subscriptions.size() == 2,
+                "configuration backup restores names and searches together");
+        Lifecycle::Access largeList;
+        largeList.owner = 123;
+        string longName;
+        for (int i = 0; i < 80; ++i) longName += u8"🚀";
+        for (int64_t id = 1000; id < 1099; ++id) {
+            largeList.change(123, id, true);
+            largeList.setName(123, id, longName);
+        }
+        const auto pages = UserMenu::pages(largeList);
+        require(pages.size() > 1, "long user lists are paginated for Telegram");
+        string allPages;
+        for (const auto &page : pages) {
+            require(page.size() <= 3500, "each user list message fits Telegram's text limit");
+            allPages += page;
+        }
+        for (int64_t id = 1000; id < 1099; ++id)
+            require(allPages.find("\n" + to_string(id) + " · " + longName + "\n") != string::npos,
+                    "pagination retains each full user name and ID");
     }
     testMultiwordMatching();
     testClearAllQueries();

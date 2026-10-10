@@ -14,6 +14,11 @@
 #include <stdexcept>
 
 namespace Networking {
+    // The configured proxy route failed before receiving an HTTP response.
+    class ProxyError : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
     class HTTPError : public std::runtime_error {
         long code;
         std::string body;

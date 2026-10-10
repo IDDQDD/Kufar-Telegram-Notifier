@@ -235,7 +235,7 @@ namespace Telegram {
         const json request = {{"commands", commands}};
         parseTelegramResponse(postJSONToURL(url, request.dump()));
         commands.push_back({{"command", "users"}, {"description", u8"Управление пользователями"}});
-        commands.push_back({{"command", "adduser"}, {"description", u8"Добавить пользователя по ID"}});
+        commands.push_back({{"command", "adduser"}, {"description", u8"Добавить пользователя: ID и имя"}});
         commands.push_back({{"command", "removeuser"}, {"description", u8"Удалить пользователя по ID"}});
         commands.push_back({{"command", "backup"}, {"description", u8"Скачать резервную копию"}});
         parseTelegramResponse(postJSONToURL(url, json{

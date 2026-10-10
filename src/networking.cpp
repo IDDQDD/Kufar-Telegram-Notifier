@@ -33,8 +33,10 @@ namespace Networking {
             (void)initialized;
         }
 
-        void validateRequestResult(const CURLcode result, const long httpStatus, const string &body) {
+        void validateRequestResult(const CURLcode result, const long httpStatus, const string &body,
+                                   bool proxyUsed = false) {
             if (result != CURLE_OK) {
+                if (proxyUsed) throw ProxyError("Proxy connection failed: " + string(curl_easy_strerror(result)));
                 throw std::runtime_error(
                     "HTTP request failed: " + string(curl_easy_strerror(result))
                 );
@@ -101,7 +103,7 @@ namespace Networking {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        validateRequestResult(result, httpStatus, responseString);
+        validateRequestResult(result, httpStatus, responseString, proxy.has_value());
         return responseString;
     }
 

@@ -1,4 +1,5 @@
 #include "lifecycle.hpp"
+#include "proxyhealth.hpp"
 #include <iostream>
 
 using namespace Lifecycle;
@@ -63,6 +64,16 @@ int main() {
                 "stale update cannot change message identity");
 
         require(parseUserID("707549545") == 707549545, "valid ID");
+        const auto namedUser = parseUserAddition(u8"707549545  Иван Петров  ");
+        require(namedUser && namedUser->id == 707549545 && namedUser->name == u8"Иван Петров", "ID with a multiword name");
+        require(parseUserAddition("707549545")->name.empty(), "adding by ID alone remains supported");
+        require(parseUserAddition(u8"707549545\tАлексей 🚀")->name == u8"Алексей 🚀", "Unicode names accepted");
+        for (const auto *invalid : {u8"Иван 707549545", "0 name", "123x name", "123 Ivan\n456 Peter", "123 Ivan\tPeter"})
+            require(!parseUserAddition(invalid), "malformed ID or multiline name rejected");
+        std::string longName;
+        for (int i = 0; i < 80; ++i) longName += u8"Я";
+        require(parseUserAddition("123 " + longName).has_value(), "name length counts Unicode characters");
+        require(!parseUserAddition("123 " + longName + u8"Я"), "overlong names rejected");
         for (const auto *invalid : {"", "0", "-100123", "@name", "12 34", "123x", "4503599627370496", "99999999999999999999"})
             require(!parseUserID(invalid), "invalid ID rejected");
         Access access;
@@ -74,11 +85,15 @@ int main() {
         require(!access.change(1, 1, false), "owner cannot remove self");
         require(!access.change(1, -2, true), "group ID rejected");
         require(access.change(1, 3, true) && access.allows(3), "owner can add empty user");
+        require(access.setName(1, 3, u8"Иван Петров"), "owner can name an enabled user");
+        require(!access.setName(2, 3, "other") && !access.setName(1, 4, "unknown"), "names do not grant access or bypass ownership");
         require(access.change(1, 2, false) && !access.allows(2), "owner can remove configured user");
         Access restarted;
         restarted.owner = 1;
         restarted.initial = {1, 2};
         restarted.load(access.save());
+        restarted.loadNames(access.saveNames());
+        require(restarted.names.at(3) == u8"Иван Петров", "names persist through JSON and restart");
         require(restarted.users() == std::set<int64_t>({1, 3}), "access persists without resurrecting configured user");
         require(restarted.change(1, 2, true) && restarted.allows(2), "removed user can rejoin");
         bool rejected = false;
@@ -89,12 +104,14 @@ int main() {
         auto queryOverrides = nlohmann::json::object();
         for (int64_t id = 100; id < 1100; ++id) {
             require(restarted.change(1, id, true), "add churn user");
+            require(restarted.setName(1, id, "temporary"), "name churn user");
             require(restarted.change(1, id, false), "remove churn user");
             queryOverrides[std::to_string(id)] = nlohmann::json::array();
         }
         restarted.compact();
         compactQueryOverrides(queryOverrides, restarted);
         require(restarted.overrides.size() == 1 && queryOverrides.empty(), "removed menu users leave no growing state");
+        require(restarted.names.size() == 1 && restarted.names.at(3) == u8"Иван Петров", "removal forgets names without affecting another user");
         restarted.change(1, 2, false);
         queryOverrides["2"] = nlohmann::json::array();
         restarted.compact();
@@ -108,6 +125,27 @@ int main() {
         restarted.load(nlohmann::json{{"9999", false}});
         restarted.compact();
         require(!restarted.save().contains("9999"), "legacy menu-user denials compacted");
+
+        ProxyHealth health;
+        for (int i = 0; i < 4; ++i) health.failed();
+        require(!health.pending() && health.failures == 0, "direct requests never raise proxy alerts");
+        health.key = "test-proxy";
+        health.failed(); health.failed();
+        require(!health.pending(), "two failures do not alert");
+        ProxyHealth resumed;
+        resumed.key = health.key;
+        resumed.load(health.save());
+        resumed.failed();
+        require(resumed.pending(), "third consecutive failure alerts after a restart too");
+        resumed.notified = true;
+        health.load(resumed.save());
+        health.failed();
+        require(!health.pending(), "an outage only alerts once across restarts");
+        health.reset(); health.failed(); health.failed(); health.failed();
+        require(health.pending(), "recovery allows a future outage alert");
+        resumed.key = "replacement-proxy";
+        resumed.load(health.save());
+        require(resumed.failures == 0 && !resumed.pending(), "changing the proxy starts a fresh health record");
 
         const int64_t now = 2000000000;
         const auto legacy = nlohmann::json{

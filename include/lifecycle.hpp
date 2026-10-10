@@ -12,6 +12,7 @@
 #include <tuple>
 #include <vector>
 #include "json.hpp"
+#include "useraccess.hpp"
 
 namespace Lifecycle {
 // Persist acceptance before replying: repeated delivery or a restart cannot reply twice.
@@ -50,65 +51,6 @@ inline bool claimTelegramDelivery(int64_t updateID, int64_t &nextOffset,
     });
     return accepted && fresh;
 }
-
-inline std::optional<int64_t> parseUserID(const std::string &text) {
-    if (text.empty() || text.size() > 16 ||
-        text.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
-    try {
-        const auto id = std::stoll(text);
-        if (id > 0 && id < (int64_t{1} << 52)) return id;
-    } catch (const std::exception &) {}
-    return std::nullopt;
-}
-
-struct Access {
-    int64_t owner = 0;
-    std::set<int64_t> initial;
-    std::map<int64_t, bool> overrides;
-
-    bool allows(int64_t id) const {
-        if (id <= 0) return false;
-        if (id == owner) return true;
-        const auto it = overrides.find(id);
-        return it == overrides.end() ? initial.count(id) != 0 : it->second;
-    }
-    bool change(int64_t actor, int64_t target, bool enabled) {
-        if (actor != owner || target == owner || !parseUserID(std::to_string(target))) return false;
-        // Only configured users need a persistent denial. Forget removed menu users.
-        if (enabled == (initial.count(target) != 0)) overrides.erase(target);
-        else overrides[target] = enabled;
-        return true;
-    }
-    void compact() {
-        for (auto it = overrides.begin(); it != overrides.end();) {
-            if (it->first == owner || it->second == (initial.count(it->first) != 0))
-                it = overrides.erase(it);
-            else ++it;
-        }
-    }
-    std::set<int64_t> users() const {
-        auto result = initial;
-        result.insert(owner);
-        for (const auto &[id, enabled] : overrides) {
-            if (enabled) result.insert(id); else result.erase(id);
-        }
-        result.insert(owner);
-        return result;
-    }
-    nlohmann::json save() const {
-        auto result = nlohmann::json::object();
-        for (const auto &[id, enabled] : overrides) result[std::to_string(id)] = enabled;
-        return result;
-    }
-    void load(const nlohmann::json &data) {
-        if (!data.is_object()) throw std::runtime_error("Invalid user access state");
-        for (auto it = data.begin(); it != data.end(); ++it) {
-            auto id = parseUserID(it.key());
-            if (!id || !it.value().is_boolean()) throw std::runtime_error("Invalid user access entry");
-            overrides[*id] = it.value().get<bool>();
-        }
-    }
-};
 
 inline void compactQueryOverrides(nlohmann::json &queries, const Access &access) {
     for (auto it = queries.begin(); it != queries.end();) {
