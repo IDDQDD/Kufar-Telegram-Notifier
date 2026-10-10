@@ -7,7 +7,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
     Kufar-Telegram-Notifier
-    VERSION 2.9.5
+    VERSION 2.9.6
 )
 
 include_directories(include)
@@ -29,6 +29,8 @@ include(CTest)
 
 if(BUILD_TESTING)
     find_package(PythonInterp 3 REQUIRED)
+    add_executable(Network-Policy-Tests tests/network_policy_tests.cpp)
+    add_test(NAME network-policy-tests COMMAND Network-Policy-Tests)
     add_executable(Network-Probe tests/network_probe.cpp src/networking.cpp src/helperfunctions.cpp)
     target_link_libraries(Network-Probe curl)
     add_test(NAME network-routing-tests COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/network_policy_tests.py $<TARGET_FILE:Network-Probe>)

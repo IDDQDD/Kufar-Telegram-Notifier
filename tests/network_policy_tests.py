@@ -1,6 +1,8 @@
-"""Exercise real libcurl against a local CONNECT proxy; no external API requests."""
+"""Exercise real libcurl against local HTTP/SOCKS proxies; no external API requests."""
 import http.server
 import os
+import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -62,6 +64,54 @@ class RoutingTests(unittest.TestCase):
                 self.destinations.clear()
                 self.run_probe(url)
                 self.assertEqual(self.destinations, [])
+
+    def test_socks4a_routes_both_search_apis_and_phone_even_with_no_proxy(self):
+        requests = []
+
+        class SocksProxy(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.settimeout(2)
+
+                def read_exact(size):
+                    data = b""
+                    while len(data) < size:
+                        part = self.request.recv(size - len(data))
+                        if not part:
+                            raise ConnectionError("Incomplete SOCKS request")
+                        data += part
+                    return data
+
+                def read_string():
+                    data = bytearray()
+                    for _ in range(256):
+                        value = read_exact(1)
+                        if value == b"\0":
+                            return bytes(data)
+                        data.extend(value)
+                    raise ValueError("SOCKS field too long")
+
+                version, command, port, address = struct.unpack("!BBH4s", read_exact(8))
+                read_string()  # SOCKS4 user ID
+                hostname = read_string()
+                requests.append((version, command, port, address, hostname))
+                # Reject locally; never connect to Kufar or start a TLS exchange.
+                self.request.sendall(b"\0\x5b\0\0\0\0\0\0")
+
+        with socketserver.ThreadingTCPServer(("127.0.0.1", 0), SocksProxy) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                proxy = f"socks4a://127.0.0.1:{server.server_address[1]}"
+                for host, path in (("api.kufar.by", "/search-api/v2/search/rendered-paginated"),
+                                   ("searchapi.kufar.by", "/v1/search/rendered-paginated"),
+                                   ("api.kufar.by", "/search-api/v2/item/1/phone")):
+                    with self.subTest(host=host, path=path):
+                        requests.clear()
+                        self.run_probe(f"https://{host}{path}", KUFAR_PROXY=proxy, NO_PROXY="*")
+                        self.assertEqual(requests, [(4, 1, 443, b"\0\0\0\1", host.encode("ascii"))])
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
 
     def test_proxy_credentials_are_not_printed_on_failure(self):
         result = self.run_probe("https://api.kufar.by/search", KUFAR_PROXY=self.proxy.replace(

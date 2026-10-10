@@ -119,7 +119,7 @@ int main() try {
             "category selected once despite repeated delivery");
     require(replies[4].at("text").get<string>().find(u8"Пока ничего не выбрано") != string::npos,
             "a new click can deselect the same category");
-    require(replies.back().at("text").get<string>().find("2.9.5") != string::npos, "status identifies updated code");
+    require(replies.back().at("text").get<string>().find("2.9.6") != string::npos, "status identifies updated code");
     require(replies.back().at("text").get<string>().find(u8"ПОИСКИ НЕ НАСТРОЕНЫ") != string::npos &&
             replies.back().at("text").get<string>().find(u8"Последняя проверка: поисков нет") != string::npos,
             "an empty query list must explain that monitoring is idle");

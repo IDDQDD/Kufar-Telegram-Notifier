@@ -910,7 +910,7 @@ Files getFiles(const int &argsCount, char **args) {
 int main(int argc, char **argv) try {
     if (argc == 2 && string(argv[1]) == "--check-kufar") {
         bool available = false;
-        cout << "[CHECK KUFAR]: version 2.9.5; no Telegram calls or state changes" << endl;
+        cout << "[CHECK KUFAR]: version 2.9.6; no Telegram calls or state changes" << endl;
         const char *proxy = getenv("KUFAR_PROXY");
         cout << "[CHECK KUFAR]: KUFAR_PROXY=" << (proxy && *proxy ? "configured" : "not configured") << endl;
         for (const auto &result : checkSearchAccess()) {
@@ -1378,7 +1378,7 @@ int main(int argc, char **argv) try {
                         !searchErrors.empty() ? u8"⚠️ ОШИБКА ПОИСКА" :
                         deliveryFailed ? u8"⚠️ ОШИБКА ОТПРАВКИ" :
                         lastSuccessfulCheckByChat[update.chatID] == 0 ? u8"⏳ ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ" : u8"🟢 БОТ РАБОТАЕТ";
-                    status << heading << u8" · 2.9.5\n\n"
+                    status << heading << u8" · 2.9.6\n\n"
                        << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
                        << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
                        << u8"🕘 Последняя проверка: "

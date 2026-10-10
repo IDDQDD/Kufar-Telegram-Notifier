@@ -193,7 +193,7 @@ namespace Kufar {
 
         json requestSearch(size_t endpoint, const string &parameters) {
             const auto response = json::parse(getJSONFromURL(searchEndpoints.at(endpoint) + "?" + parameters,
-                {"Accept: application/json", "User-Agent: Kufar-Telegram-Notifier/2.9.5"}));
+                {"Accept: application/json", "User-Agent: Kufar-Telegram-Notifier/2.9.6"}));
             if (!response.is_object() || !response.contains("ads") || !response.at("ads").is_array())
                 throw runtime_error("Kufar search returned an invalid ads array");
             return response;
