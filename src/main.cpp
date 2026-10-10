@@ -900,8 +900,6 @@ Files getFiles(const int &argsCount, char **args) {
     if (files.cache.path.empty()) {
         if (const char *cachePath = getenv("KUFAR_CACHE_PATH")) {
             files.cache.path = cachePath;
-        } else if (const char *volumePath = getenv("RAILWAY_VOLUME_MOUNT_PATH")) {
-            files.cache.path = string(volumePath) + PATH_SEPARATOR + CACHE_FILE_NAME;
         }
     }
     
@@ -998,7 +996,7 @@ int main(int argc, char **argv) try {
 
         if (discoveredChatID.has_value()) {
             cout << "[SETUP]: TELEGRAM_CHAT_ID=" << discoveredChatID.value() << endl;
-            cout << "[SETUP]: Add this value to Railway and redeploy the service." << endl;
+            cout << "[SETUP]: Set TELEGRAM_CHAT_ID and TELEGRAM_ADMIN_ID in .env, then run bash update.sh." << endl;
             return 0;
         }
 
