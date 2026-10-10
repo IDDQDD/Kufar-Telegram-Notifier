@@ -23,6 +23,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /src/build/bin/Kufar-Telegram-Notifier /app/Kufar-Telegram-Notifier
 COPY kufar-configuration.json /app/kufar-configuration.json
+COPY kufar-proxies.txt /app/kufar-proxies.txt
 
 ENV KUFAR_CONFIG_PATH=/app/kufar-configuration.json \
     KUFAR_CACHE_PATH=/data/cached-data.json

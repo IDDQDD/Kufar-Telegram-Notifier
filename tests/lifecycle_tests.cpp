@@ -146,6 +146,14 @@ int main() {
         resumed.key = "replacement-proxy";
         resumed.load(health.save());
         require(resumed.failures == 0 && !resumed.pending(), "changing the proxy starts a fresh health record");
+        health.configurePool({"http://primary:8080", "http://reserve:8080"});
+        health.failed(); health.failed(); health.failed();
+        resumed.configurePool({"http://primary:8080", "http://reserve:8080"});
+        resumed.load(health.save());
+        require(resumed.pending(), "an unchanged pool restores outage state");
+        resumed.configurePool({"http://primary:8080", "http://new-reserve:8080"});
+        resumed.load(health.save());
+        require(!resumed.pending() && resumed.failures == 0, "changing a reserve resets outage state");
 
         const int64_t now = 2000000000;
         const auto legacy = nlohmann::json{

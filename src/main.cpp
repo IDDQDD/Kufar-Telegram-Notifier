@@ -29,6 +29,7 @@
 #include "helperfunctions.hpp"
 #include "lifecycle.hpp"
 #include "proxyhealth.hpp"
+#include "proxypool.hpp"
 #include "usermenu.hpp"
 #include "version.hpp"
 #include "querygrouping.hpp"
@@ -336,7 +337,7 @@ void sendPendingProxyAlert(Lifecycle::ProxyHealth &health, const TelegramConfigu
         ownerConfiguration.chatID = ownerID;
         sendTextMessage(ownerConfiguration,
             u8"⚠️ Не удаётся подключиться к Kufar через настроенный прокси: 3 попытки поиска подряд завершились ошибкой соединения.\n"
-            u8"Мониторинг продолжит попытки по расписанию. Проверьте прокси и соединение VPS; подробности — в /status и логах.");
+            u8"Основной и все резервные прокси недоступны. Мониторинг продолжит попытки по расписанию. Подробности — в /status и логах.");
         health.notified = true;
         persist();
     } catch (const StorageError &) {
@@ -940,6 +941,7 @@ int main(int argc, char **argv) try {
         cout << "[CHECK KUFAR]: version " << Application::version << "; no Telegram calls or state changes" << endl;
         const char *proxy = getenv("KUFAR_PROXY");
         cout << "[CHECK KUFAR]: KUFAR_PROXY=" << (proxy && *proxy ? "configured" : "not configured") << endl;
+        cout << "[CHECK KUFAR]: proxy routes=" << NetworkPolicy::configuredKufarProxies().size() << endl;
         for (const auto &result : checkSearchAccess()) {
             cout << result.endpoint << ": ";
             if (result.count) {
@@ -1070,8 +1072,7 @@ int main(int argc, char **argv) try {
         }
     }
     Lifecycle::ProxyHealth proxyHealth;
-    const char *configuredProxy = getenv("KUFAR_PROXY");
-    proxyHealth.configure(configuredProxy ? configuredProxy : "");
+    proxyHealth.configurePool(NetworkPolicy::configuredKufarProxies());
     if (programConfiguration.files.cache.contents.is_object())
         proxyHealth.load(programConfiguration.files.cache.contents.value("proxy-health", json::object()));
     string lastSavedState;

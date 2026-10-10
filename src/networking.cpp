@@ -13,6 +13,7 @@
 #include "networking.hpp"
 #include "helperfunctions.hpp"
 #include "networkpolicy.hpp"
+#include "proxypool.hpp"
 
 namespace Networking {
     using std::string;
@@ -67,8 +68,11 @@ namespace Networking {
     string getJSONFromURL(const string &url, const std::vector<string> &requestHeaders) {
         // URLs may contain the Telegram bot token, so never print them.
         DEBUG_MSG("[HTTP GET]");
-        const char *proxySetting = std::getenv("KUFAR_PROXY");
-        const auto proxy = NetworkPolicy::kufarProxy(url, proxySetting ? proxySetting : "");
+        NetworkPolicy::ProxyPool *pool = nullptr;
+        if (NetworkPolicy::isKufarURL(url)) {
+            static NetworkPolicy::ProxyPool configuredPool(NetworkPolicy::configuredKufarProxies());
+            if (!configuredPool.empty()) pool = &configuredPool;
+        }
 
         ensureCurlInitialized();
         auto curl = curl_easy_init();
@@ -82,11 +86,6 @@ namespace Networking {
         }
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        if (proxy) {
-            curl_easy_setopt(curl, CURLOPT_PROXY, proxy->c_str());
-            // An inherited NO_PROXY must not silently bypass an explicitly selected route.
-            curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
-        }
         if (headers != nullptr) {
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         }
@@ -98,12 +97,36 @@ namespace Networking {
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeFunction);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseString);
 
-        const CURLcode result = curl_easy_perform(curl);
+        CURLcode result = CURLE_OK;
         long httpStatus = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+        std::vector<size_t> attempted;
+        if (pool) {
+            // Reuse a reachable route, but allow each API endpoint to try the entire pool.
+            result = CURLE_COULDNT_CONNECT;
+            while (const auto index = pool->next(attempted)) {
+                attempted.push_back(*index);
+                responseString.clear();
+                httpStatus = 0;
+                curl_easy_setopt(curl, CURLOPT_PROXY, pool->at(*index).c_str());
+                curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
+                curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, attempted.size() == 1 ? 10L : 5L);
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT, attempted.size() == 1 ? 20L : 12L);
+                result = curl_easy_perform(curl);
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+                if (result == CURLE_OK) {
+                    pool->connected(*index);
+                    break;
+                }
+                std::cerr << "[KUFAR PROXY]: connection failed on route " << (*index + 1)
+                          << "; trying reserves" << std::endl;
+            }
+        } else {
+            result = curl_easy_perform(curl);
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+        }
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        validateRequestResult(result, httpStatus, responseString, proxy.has_value());
+        validateRequestResult(result, httpStatus, responseString, pool != nullptr);
         return responseString;
     }
 

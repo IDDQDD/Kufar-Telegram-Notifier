@@ -220,6 +220,8 @@ void testProxyNotifications(const filesystem::path &directory) {
     require(proxyAlertAttempts.empty(), "restart during the same outage must not resend its alert");
     run("proxy-http-cache.json", {1, 1, 2, 1, 1}, true);
     require(proxyAlertAttempts.empty(), "Kufar HTTP 403 does not count as proxy unavailability");
+    run("proxy-recovery-cache.json", {1, 1, 0, 1, 1, 0, 1, 1}, true);
+    require(proxyAlertAttempts.empty(), "a search succeeding through any route resets the outage counter");
     proxyAlertSendFailures = 1;
     run("proxy-send-cache.json", {1, 1, 1, 1, 1}, true);
     require(proxyAlertAttempts == vector<size_t>({2, 3}) && proxyAlertSendFailures == 0 &&

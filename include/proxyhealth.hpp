@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <string>
+#include <vector>
 #include "json.hpp"
 
 namespace Lifecycle {
@@ -16,6 +17,14 @@ struct ProxyHealth {
         // This identifies a configuration for restart recovery; credentials are never stored.
         key = proxy.empty() ? "" : std::to_string(std::hash<std::string>{}(proxy));
         reset();
+    }
+    void configurePool(const std::vector<std::string> &proxies) {
+        std::string configuration;
+        for (const auto &proxy : proxies) {
+            if (!configuration.empty()) configuration += '\n';
+            configuration += proxy;
+        }
+        configure(configuration);
     }
     void failed() { if (!key.empty()) failures = std::min(alertThreshold, failures + 1); }
     void reset() { failures = 0; notified = false; }
