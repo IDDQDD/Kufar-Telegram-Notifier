@@ -126,7 +126,8 @@ class RoutingTests(unittest.TestCase):
 
     def test_dead_primary_reaches_backup_and_exhaustion_is_a_proxy_error(self):
         result = self.run_probe("https://api.kufar.by/search", KUFAR_PROXY="http://127.0.0.1:1",
-                                KUFAR_PROXY_POOL=self.proxy, NO_PROXY="*")
+                                KUFAR_PROXY_POOL=self.proxy, NO_PROXY="*", NETWORK_TEST_REPORT_PROXY_STATUS="1")
+        self.assertIn("Proxy status: unavailable", result.stdout)
         self.assertEqual(self.destinations, ["api.kufar.by:443"])
         self.assertIn("ProxyError:", result.stderr)
         self.assertIn("route 1", result.stderr)
@@ -175,7 +176,8 @@ class RoutingTests(unittest.TestCase):
                             return
                         request += part
                     body = b'{"ads":[]}'
-                    connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n" + body)
+                    status = b"403 Forbidden" if b"/forbidden " in request else b"200 OK"
+                    connection.sendall(b"HTTP/1.1 " + status + b"\r\nContent-Length: 10\r\nConnection: close\r\n\r\n" + body)
 
         with tempfile.TemporaryDirectory(prefix="kufar-proxy-tls-") as directory, \
                 socketserver.ThreadingTCPServer(("127.0.0.1", 0), WorkingProxy) as server:
@@ -186,13 +188,17 @@ class RoutingTests(unittest.TestCase):
             thread.start()
             try:
                 backup = f"http://127.0.0.1:{server.server_address[1]}"
-                result = subprocess.run([PROBE, "https://api.kufar.by/search", "https://searchapi.kufar.by/search"],
+                result = subprocess.run([PROBE, "https://api.kufar.by/search", "https://searchapi.kufar.by/search",
+                                         "https://api.kufar.by/forbidden"],
                     env=dict(self.environment, KUFAR_PROXY="http://127.0.0.1:1", KUFAR_PROXY_POOL=backup,
-                             NO_PROXY="*", NETWORK_TEST_CA_FILE=str(certificate)),
+                             NO_PROXY="*", NETWORK_TEST_CA_FILE=str(certificate), NETWORK_TEST_REPORT_PROXY_STATUS="1"),
                     capture_output=True, text=True, timeout=15)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertEqual(result.stdout.count('{"ads":[]}'), 2)
-                self.assertEqual(len(destinations), 2)
+                self.assertEqual(result.stdout.count("Proxy status: available"), 3,
+                                 "a successful reserve and Kufar HTTP 403 both confirm proxy connectivity")
+                self.assertIn("HTTP request returned status 403", result.stderr)
+                self.assertEqual(len(destinations), 3)
                 self.assertEqual(result.stderr.count("route 1"), 1, "dead primary should not be retried immediately")
                 self.assertNotIn("ProxyError:", result.stderr)
             finally:

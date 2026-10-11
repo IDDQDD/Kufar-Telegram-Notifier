@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 #include "networkpolicy.hpp"
+#include "networking.hpp"
 
 namespace NetworkPolicy {
 inline std::vector<std::string> configuredKufarProxies() {
@@ -50,10 +51,14 @@ class ProxyPool {
 private:
     std::vector<std::string> proxies;
     size_t active = 0;
+    Networking::ProxyAvailability state = Networking::ProxyAvailability::unknown;
 public:
     explicit ProxyPool(std::vector<std::string> values)
         : proxies(std::move(values)) {}
     bool empty() const { return proxies.empty(); }
+    Networking::ProxyAvailability availability() const {
+        return empty() ? Networking::ProxyAvailability::notConfigured : state;
+    }
     const std::string &at(size_t index) const { return proxies.at(index); }
     std::optional<size_t> next(const std::vector<size_t> &attempted) const {
         for (size_t offset = 0; offset < proxies.size(); ++offset) {
@@ -62,6 +67,10 @@ public:
         }
         return std::nullopt;
     }
-    void connected(size_t index) { active = index; }
+    void connected(size_t index) {
+        active = index;
+        state = Networking::ProxyAvailability::available;
+    }
+    void unavailable() { state = Networking::ProxyAvailability::unavailable; }
 };
 }

@@ -14,6 +14,9 @@
 #include <stdexcept>
 
 namespace Networking {
+    enum class ProxyAvailability { notConfigured, unknown, available, unavailable };
+    ProxyAvailability kufarProxyAvailability();
+
     // The configured proxy route failed before receiving an HTTP response.
     class ProxyError : public std::runtime_error {
     public:

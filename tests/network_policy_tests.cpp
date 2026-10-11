@@ -24,14 +24,24 @@ int main() {
         }
         require(!NetworkPolicy::kufarProxy("https://api.kufar.by/search", ""), "empty setting keeps direct routing");
         NetworkPolicy::ProxyPool pool({"http://primary:8080", "http://reserve:8080", "socks4://third:4153"});
+        require(pool.availability() == Networking::ProxyAvailability::unknown,
+                "configured proxies are not reported as available before a connection");
         require(pool.next({}) == 0, "primary is used first");
         require(pool.next({0}) == 1, "failed primary switches to reserve");
         pool.connected(1);
+        require(pool.availability() == Networking::ProxyAvailability::available,
+                "a reachable reserve makes proxy routing available");
         require(pool.next({}) == 1, "reachable reserve remains active on the next request");
         require(pool.next({1}) == 2, "failed active reserve switches to another route");
         require(pool.next({1, 2}) == 0, "remaining routes are tried before declaring a pool outage");
         require(!pool.next({0, 1, 2}), "a request never retries the same route twice");
         require(pool.next({}) == 1, "a different API request can try a previously failed route");
+        pool.unavailable();
+        require(pool.availability() == Networking::ProxyAvailability::unavailable, "exhausted pool reports outage");
+        pool.connected(0);
+        require(pool.availability() == Networking::ProxyAvailability::available, "connection recovery clears outage");
+        require(NetworkPolicy::ProxyPool({}).availability() == Networking::ProxyAvailability::notConfigured,
+                "direct routing is distinguished from proxy availability");
         require(!NetworkPolicy::ProxyPool({}).next({}), "empty pool has no candidate");
         for (const std::string setting : {std::string("socks4x://127.0.0.1:1080"),
                                           std::string("socks4://127.0.0.1:1080\nprivate-test-secret"),

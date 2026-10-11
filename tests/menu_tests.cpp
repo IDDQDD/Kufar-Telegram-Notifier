@@ -21,6 +21,7 @@ bool proxyTest = false;
 vector<int> proxyOutcomes; // 0: success, 1: proxy transport failure, 2: Kufar HTTP 403.
 vector<size_t> proxyAlertAttempts;
 int proxyAlertSendFailures = 0;
+Networking::ProxyAvailability proxyAvailability = Networking::ProxyAvailability::unknown;
 void require(bool condition, const char *message) {
     if (!condition) throw runtime_error(message);
 }
@@ -31,6 +32,10 @@ json message(int64_t updateID, int64_t messageID, const string &text) {
 }
 
 namespace Networking {
+ProxyAvailability kufarProxyAvailability() {
+    return NetworkPolicy::configuredKufarProxies().empty()
+        ? ProxyAvailability::notConfigured : proxyAvailability;
+}
 string urlEncode(const string &value) { return value; }
 string getJSONFromURL(const string &url) {
     if (probeTest) {
@@ -46,6 +51,7 @@ string getJSONFromURL(const string &url) {
                 "monitoring must request a bounded result page for the saved search");
         if (proxyTest) {
             const int outcome = proxyOutcomes.at(nextBatch - 1);
+            proxyAvailability = outcome == 1 ? ProxyAvailability::unavailable : ProxyAvailability::available;
             if (outcome == 1) throw ProxyError("Offline proxy connection failed");
             if (outcome == 2) throw HTTPError(403, "Forbidden");
             return R"({"ads":[]})";
@@ -199,9 +205,12 @@ void testProxyNotifications(const filesystem::path &directory) {
         const auto messageID = state.is_object() && state.contains("telegram-message-ids")
             ? state.at("telegram-message-ids").value("123", int64_t{0}) + 1 : 1;
         proxyOutcomes = outcomes;
+        proxyAvailability = Networking::ProxyAvailability::unknown;
         proxyAlertAttempts.clear();
         batches.assign(outcomes.size() + 1, json::array());
         batches[0] = json::array({message(expectedOffset, messageID, "/menu")});
+        for (size_t index = 1; index < batches.size(); ++index)
+            batches[index] = json::array({message(expectedOffset + index, messageID + index, "/status")});
         nextBatch = 0;
         scheduleTest = proxyTest = true;
         replies.clear();
@@ -211,6 +220,18 @@ void testProxyNotifications(const filesystem::path &directory) {
         for (auto &argument : arguments) argv.push_back(argument.data());
         require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "proxy alert run failed");
         scheduleTest = proxyTest = false;
+        vector<string> statuses;
+        for (const auto &reply : replies) {
+            const auto text = reply.at("text").get<string>();
+            if (text.find(u8"🟢 Бот работает\n") == 0) statuses.push_back(text);
+        }
+        require(statuses.size() == outcomes.size(), "every status request must receive a compact reply");
+        for (size_t index = 0; index < outcomes.size(); ++index) {
+            const string expected = !getenv("KUFAR_PROXY") ? u8"🟢 Бот работает\n⚪ Прокси-серверы не настроены" :
+                outcomes[index] == 1 ? u8"🟢 Бот работает\n🔴 Прокси-серверы недоступны" :
+                u8"🟢 Бот работает\n🟢 Прокси-серверы доступны";
+            require(statuses[index] == expected, "status follows transport failures, HTTP responses and recovery");
+        }
     };
     setProxy(string("socks4://offline-proxy.invalid:4153"));
     run("proxy-cache.json", {1, 1, 1, 1, 0, 1, 1, 1, 1}, true);
@@ -231,6 +252,7 @@ void testProxyNotifications(const filesystem::path &directory) {
     run("direct-cache.json", {1, 1, 1, 1}, true);
     require(proxyAlertAttempts.empty(), "no proxy setting means no proxy notifications");
     setProxy(originalProxy);
+    proxyAvailability = Networking::ProxyAvailability::unknown;
     nextBatch = 0;
     replies.clear();
     statePath = previousPath;
@@ -264,10 +286,10 @@ int main() try {
             "category selected once despite repeated delivery");
     require(replies[4].at("text").get<string>().find(u8"Пока ничего не выбрано") != string::npos,
             "a new click can deselect the same category");
-    require(replies.back().at("text").get<string>().find("2.9.7") != string::npos, "status identifies updated code");
-    require(replies.back().at("text").get<string>().find(u8"ПОИСКИ НЕ НАСТРОЕНЫ") != string::npos &&
-            replies.back().at("text").get<string>().find(u8"Последняя проверка: поисков нет") != string::npos,
-            "an empty query list must explain that monitoring is idle");
+    const string initialStatus = replies.back().at("text");
+    require(initialStatus == u8"🟢 Бот работает\n⚪ Прокси-серверы не настроены" ||
+            initialStatus == u8"🟢 Бот работает\n⏳ Доступность прокси-серверов ещё не проверена",
+            "status contains only bot operation and proxy availability, even without searches");
 
     replies.clear();
     incoming.push_back(message(10, 107, "/menu"));
@@ -329,7 +351,7 @@ int main() try {
         json::array({message(1, 1, "/add"), message(2, 2, u8"Гиря"), message(3, 3, u8"⬜ Все категории"),
                      message(4, 4, u8"✅ Сохранить поиск (1)"), message(5, 5, "/status")}),
         json::array({message(6, 6, "/check"), message(6, 6, "/check"), message(9, 6, "/check")}),
-        json::array({message(10, 10, "/status")})
+        json::array({message(10, 10, u8"ℹ️ Статус")})
     };
     expectedOffset = 0;
     replies.clear();
@@ -338,8 +360,7 @@ int main() try {
     require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "schedule run failed");
     scheduleTest = false;
     require(searchCount == 2, "adding a query and manual check must wake the cycle rather than wait 30 minutes");
-    require(replies[4].at("text").get<string>().find(u8"ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ") != string::npos,
-            "status before the first search must describe pending initialization");
+    require(replies[4].at("text") == initialStatus, "pending searches do not add details to the status");
     size_t advertsSent = 0;
     for (const auto &reply : replies) {
         if (!reply.contains("parse_mode")) continue;
@@ -348,19 +369,19 @@ int main() try {
                 "priming and previously seen adverts must stay silent");
     }
     require(advertsSent == 1, "only one new advert must be delivered");
-    require(replies.back().at("text").get<string>().find(u8"уже в кеше: 1") != string::npos &&
-            replies.back().at("text").get<string>().find(u8"уведомлений: 1") != string::npos,
-            "status must distinguish previously seen listings from delivered notifications");
+    require(replies.back().at("text") == initialStatus, "search statistics stay out of the status");
     const auto checkedState = getJSONDataFromPath(statePath);
     require(checkedState.at("last-successful-checks").at("123").get<int64_t>() > 0,
             "last successful check must be stored on disk");
-    incoming = json::array({message(11, 11, "/status")});
+    incoming = json::array({message(11, 11, "/status@OfflineBot")});
     expectedOffset = 11;
     replies.clear();
     stopping = 0;
     require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "restart with check history failed");
-    require(replies.size() == 1 && replies[0].at("text").get<string>().find(u8"Последняя проверка: только что") != string::npos,
-            "restarting must retain the successful check instead of returning to pending status");
+    require(replies.size() == 1 && replies[0].at("text") == initialStatus,
+            "restart keeps the status compact");
+    require(getJSONDataFromPath(statePath).at("last-successful-checks") == checkedState.at("last-successful-checks"),
+            "restart still preserves successful check history");
 
     // Failed searches must not prime an empty cache, and failed sends must be retried.
     statePath = (directory / "retry-cache.json").string();
@@ -373,7 +394,7 @@ int main() try {
     for (auto &argument : arguments) argv.push_back(argument.data());
     batches = {json::array(), json::array({message(1, 1, "/status")}),
         json::array({message(2, 2, "/status")}), json::array({message(3, 3, "/status")}),
-        json::array({message(4, 4, "/status")})};
+        json::array({message(4, 4, u8"📊 Состояние")})};
     nextBatch = 0;
     expectedOffset = 0;
     searchCount = 0;
@@ -385,10 +406,8 @@ int main() try {
     require(kufarNotifierApplicationMain(static_cast<int>(argv.size()), argv.data()) == 0, "retry run failed");
     scheduleTest = false;
     require(searchCount == 3 && sendFailuresRemaining == 0, "API recovery, baseline and failed-send retry must run");
-    require(replies[0].at("text").get<string>().find(u8"ОШИБКА ПОИСКА") != string::npos,
-            "a completely failed search must report an error before any successful priming");
-    require(replies[2].at("text").get<string>().find(u8"ошибок отправки: 1") != string::npos,
-            "status must distinguish Telegram send failure from an empty search");
+    require(replies[0].at("text") == initialStatus && replies[2].at("text") == initialStatus,
+            "search and delivery errors do not expand the status");
     advertsSent = 0;
     for (const auto &reply : replies) if (reply.contains("parse_mode")) ++advertsSent;
     require(advertsSent == 1, "a failed new listing must be delivered once on retry, baseline stays silent");

@@ -19,6 +19,11 @@ namespace Networking {
     using std::string;
 
     namespace {
+        NetworkPolicy::ProxyPool &kufarProxyPool() {
+            static NetworkPolicy::ProxyPool pool(NetworkPolicy::configuredKufarProxies());
+            return pool;
+        }
+
         static size_t writeFunction(void *ptr, size_t size, size_t nmemb, string *data) {
             data->append((char*)ptr, size * nmemb);
             return size * nmemb;
@@ -48,6 +53,10 @@ namespace Networking {
         }
     }
 
+    ProxyAvailability kufarProxyAvailability() {
+        return kufarProxyPool().availability();
+    }
+
     string urlEncode(const string &text) {
         ensureCurlInitialized();
         CURL *curl = curl_easy_init();
@@ -70,7 +79,7 @@ namespace Networking {
         DEBUG_MSG("[HTTP GET]");
         NetworkPolicy::ProxyPool *pool = nullptr;
         if (NetworkPolicy::isKufarURL(url)) {
-            static NetworkPolicy::ProxyPool configuredPool(NetworkPolicy::configuredKufarProxies());
+            auto &configuredPool = kufarProxyPool();
             if (!configuredPool.empty()) pool = &configuredPool;
         }
 
@@ -120,6 +129,7 @@ namespace Networking {
                 std::cerr << "[KUFAR PROXY]: connection failed on route " << (*index + 1)
                           << "; trying reserves" << std::endl;
             }
+            if (result != CURLE_OK) pool->unavailable();
         } else {
             result = curl_easy_perform(curl);
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);

@@ -31,6 +31,7 @@
 #include "proxyhealth.hpp"
 #include "proxypool.hpp"
 #include "usermenu.hpp"
+#include "botstatus.hpp"
 #include "version.hpp"
 #include "querygrouping.hpp"
 #include "statelock.hpp"
@@ -248,24 +249,6 @@ bool isNewLowestPrice(const int currentPrice, const int lowestPrice) {
     return currentPrice > 0 && lowestPrice > 0 && currentPrice < lowestPrice;
 }
 
-string formatElapsed(const time_t timestamp) {
-    if (timestamp <= 0) {
-        return "ещё не завершена";
-    }
-
-    const time_t elapsed = max<time_t>(0, time(nullptr) - timestamp);
-    if (elapsed < 10) {
-        return "только что";
-    }
-    if (elapsed < 60) {
-        return to_string(elapsed) + " сек. назад";
-    }
-    if (elapsed < 3600) {
-        return to_string(elapsed / 60) + " мин. назад";
-    }
-    return to_string(elapsed / 3600) + " ч. назад";
-}
-
 KufarConfiguration parseKufarConfiguration(const json &query) {
     KufarConfiguration kufarConfiguration;
 
@@ -337,7 +320,7 @@ void sendPendingProxyAlert(Lifecycle::ProxyHealth &health, const TelegramConfigu
         ownerConfiguration.chatID = ownerID;
         sendTextMessage(ownerConfiguration,
             u8"⚠️ Не удаётся подключиться к Kufar через настроенный прокси: 3 попытки поиска подряд завершились ошибкой соединения.\n"
-            u8"Основной и все резервные прокси недоступны. Мониторинг продолжит попытки по расписанию. Подробности — в /status и логах.");
+            u8"Основной и все резервные прокси недоступны. Мониторинг продолжит попытки по расписанию. Подробности — в логах.");
         health.notified = true;
         persist();
     } catch (const StorageError &) {
@@ -1125,12 +1108,11 @@ int main(int argc, char **argv) try {
         }
     };
 
-    map<int64_t, map<string, string>> searchErrorsByChat;
-    // Counts are from each active search's latest successful request in this process.
+    // Keep detailed search diagnostics in the logs.
     struct SearchCounts {
-        size_t received = 0, filtered = 0, seen = 0, primed = 0, sent = 0, sendErrors = 0;
+        size_t filtered = 0, seen = 0, primed = 0, sendErrors = 0;
     };
-    map<int64_t, map<string, SearchCounts>> searchCountsByChat;
+
     map<int64_t, MenuState> menuStates;
     uint64_t subscriptionRevision = 0;
     for (const int64_t chatID : access.users()) {
@@ -1307,7 +1289,7 @@ int main(int argc, char **argv) try {
                     }
                     menuStates.erase(target);
                     lastSuccessfulCheckByChat.erase(target);
-                    searchErrorsByChat.erase(target);
+
                     menuState = MenuState{};
                     sendMainMenu(u8"✅ Пользователь " + to_string(target) + u8" отключён. Запросы и кеш удалены.");
                     ++subscriptionRevision;
@@ -1400,85 +1382,8 @@ int main(int argc, char **argv) try {
                 if (isStatusCommand(text) ||
                     text == u8"ℹ️ Статус" ||
                     text == u8"📊 Состояние") {
-                    const size_t queryCount = count_if(
-                        programConfiguration.subscriptions.begin(),
-                        programConfiguration.subscriptions.end(),
-                        [&](const QuerySubscription &subscription) {
-                            return subscription.chatID == update.chatID;
-                        }
-                    );
-
-                    ostringstream status;
-                    auto &searchErrors = searchErrorsByChat[update.chatID];
-                    for (auto error = searchErrors.begin(); error != searchErrors.end();) {
-                        const bool active = any_of(programConfiguration.subscriptions.begin(),
-                            programConfiguration.subscriptions.end(), [&](const QuerySubscription &subscription) {
-                                return subscription.chatID == update.chatID && subscription.cacheKey == error->first;
-                            });
-                        if (!active) error = searchErrors.erase(error); else ++error;
-                    }
-                    const auto ownSubscriptions = subscriptionsForChat(programConfiguration, update.chatID);
-                    const bool deliveryFailed = any_of(ownSubscriptions.begin(), ownSubscriptions.end(),
-                        [&](const QuerySubscription &subscription) {
-                            const auto result = searchCountsByChat[update.chatID].find(subscription.cacheKey);
-                            return result != searchCountsByChat[update.chatID].end() && result->second.sendErrors > 0;
-                        });
-                    const string heading = queryCount == 0 ? u8"⚪ ПОИСКИ НЕ НАСТРОЕНЫ" :
-                        !searchErrors.empty() ? u8"⚠️ ОШИБКА ПОИСКА" :
-                        deliveryFailed ? u8"⚠️ ОШИБКА ОТПРАВКИ" :
-                        lastSuccessfulCheckByChat[update.chatID] == 0 ? u8"⏳ ОЖИДАНИЕ ПЕРВОЙ ПРОВЕРКИ" : u8"🟢 БОТ РАБОТАЕТ";
-                    status << heading << u8" · " << Application::version << "\n\n"
-                       << u8"🔎 Активных запросов: " << groupQueries(subscriptionsForChat(programConfiguration, update.chatID)).size() << "\n"
-                       << u8"📂 Проверок по вариантам и категориям: " << queryCount << "\n"
-                       << u8"🕘 Последняя проверка: "
-                       << (queryCount == 0 ? u8"поисков нет" : formatElapsed(lastSuccessfulCheckByChat[update.chatID])) << "\n"
-                       << u8"🗃 Объявлений в памяти: "
-                       << recipientCaches[update.chatID].viewedAds.size() << "\n"
-                       << u8"⏱ Интервал цикла: " << programConfiguration.loopDelaySeconds << u8" сек. (долгая проверка увеличивает интервал)";
-
-                    status << u8"\n🧹 Кеш: до " << programConfiguration.cacheMaxPerUser
-                           << u8" объявлений; хранение " << programConfiguration.cacheRetentionDays << u8" дней без появления в выдаче.";
-                    SearchCounts totals;
-                    size_t measured = 0;
-                    for (const auto &subscription : subscriptionsForChat(programConfiguration, update.chatID)) {
-                        const auto result = searchCountsByChat[update.chatID].find(subscription.cacheKey);
-                        if (result == searchCountsByChat[update.chatID].end()) continue;
-                        ++measured;
-                        const auto &counts = result->second;
-                        totals.received += counts.received;
-                        totals.filtered += counts.filtered;
-                        totals.seen += counts.seen;
-                        totals.primed += counts.primed;
-                        totals.sent += counts.sent;
-                        totals.sendErrors += counts.sendErrors;
-                    }
-                    if (measured) {
-                        status << u8"\n📥 Последние результаты (поисков: " << measured << "/" << queryCount << ")"
-                               << u8"\nПолучено: " << totals.received << u8"; отфильтровано: " << totals.filtered
-                               << u8"; уже в кеше: " << totals.seen
-                               << u8"\nЗапомнено при первом запуске: " << totals.primed
-                               << u8"; уведомлений: " << totals.sent << u8"; ошибок отправки: " << totals.sendErrors;
-                    }
-                    if (queryCount) status << u8"\n/check — проверить сейчас, сохранив кеш.";
-                    if (queryCount == 0) {
-                        status << u8"\n➕ Нажмите «Новый запрос», чтобы начать мониторинг.\n"
-                               << u8"Без сохранённых запросов бот не обращается к поиску Kufar.";
-                    } else if (!searchErrors.empty()) {
-                        status << u8"\n⚠️ Не удалось проверить поисков: " << searchErrors.size()
-                               << "\n" << searchErrors.begin()->second;
-                    } else if (lastSuccessfulCheckByChat[update.chatID] == 0 && queryCount > 0) {
-                        status << u8"\n⏳ Ожидается первая успешная проверка. Старые объявления запоминаются без уведомлений.";
-                    }
-                    if (isOwner) {
-                        error_code spaceError;
-                        const auto directory = filesystem::absolute(programConfiguration.files.cache.path).parent_path();
-                        const auto disk = filesystem::space(directory, spaceError);
-                        status << u8"\n💾 Файл состояния: " << getFileSize(programConfiguration.files.cache.path) / 1024
-                               << u8" КиБ / " << MAX_STATE_BYTES / (1024 * 1024)
-                               << u8" МиБ. Общий лимит: " << programConfiguration.cacheMaxTotal << u8" записей.";
-                        if (!spaceError) status << u8"\n📀 Свободно на диске данных: " << disk.available / (1024 * 1024) << u8" МиБ.";
-                    }
-                    sendTextMessageWithKeyboard(telegramConfiguration, status.str(), mainMenuKeyboard(isOwner));
+                    sendTextMessageWithKeyboard(telegramConfiguration,
+                        BotStatus::message(Networking::kufarProxyAvailability()), mainMenuKeyboard(isOwner));
                     cout << "[STATUS]: Replied to chat " << update.chatID << endl;
                     continue;
                 }
@@ -1848,7 +1753,6 @@ int main(int argc, char **argv) try {
                 cout << "[SEARCH]: Chat " << subscription.chatID << ", query=" << queryKey << endl;
                 const auto adverts = getAds(requestConfiguration);
                 proxyHealth.reset();
-                counts.received = adverts.size();
                 for (auto advert : adverts) {
                     if (stopping) break;
                     if (advert.isDemand) {
@@ -1981,9 +1885,7 @@ int main(int argc, char **argv) try {
 
                 lastSuccessfulCheckByChat[subscription.chatID] = time(nullptr);
                 counts.filtered = filteredDemandCount + filteredTitleCount + filteredQueryTermsCount + filteredRequiredPhraseCount;
-                counts.sent = sentCount;
-                searchCountsByChat[subscription.chatID][queryKey] = counts;
-                searchErrorsByChat[subscription.chatID].erase(queryKey);
+
                 cout << "[SEARCH OK]: Chat " << subscription.chatID << ", query=" << queryKey
                      << ", received=" << adverts.size() << ", filtered=" << counts.filtered
                      << ", seen=" << counts.seen << ", primed=" << counts.primed
@@ -1997,7 +1899,7 @@ int main(int argc, char **argv) try {
             } catch (const exception &exc) {
                 if (dynamic_cast<const Networking::ProxyError *>(&exc)) proxyHealth.failed();
                 else proxyHealth.reset();
-                searchErrorsByChat[subscription.chatID][queryKey] = exc.what();
+
                 cerr << "[ERROR (getAds)]: Chat " << subscription.chatID << ", query=" << queryKey
                      << ", " << exc.what() << endl;
             }

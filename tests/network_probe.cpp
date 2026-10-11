@@ -18,6 +18,13 @@ int main(int argc, char **argv) {
         try { std::cout << Networking::getJSONFromURL(argv[index]) << '\n'; }
         catch (const Networking::ProxyError &error) { std::cerr << "ProxyError: " << error.what() << '\n'; status = 1; }
         catch (const std::exception &error) { std::cerr << error.what() << '\n'; status = 1; }
+        if (std::getenv("NETWORK_TEST_REPORT_PROXY_STATUS")) {
+            const auto availability = Networking::kufarProxyAvailability();
+            const char *label = availability == Networking::ProxyAvailability::available ? "available" :
+                availability == Networking::ProxyAvailability::unavailable ? "unavailable" :
+                availability == Networking::ProxyAvailability::notConfigured ? "not configured" : "unknown";
+            std::cout << "Proxy status: " << label << '\n';
+        }
     }
     return status;
 }
