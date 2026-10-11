@@ -1,5 +1,11 @@
 # Netherlands proxies that returned Kufar ads. Public proxies may be unreliable.
+# Checked 2026-10-11; see PROXY_AUDIT.md for availability and privacy limits.
 # KUFAR_PROXY is tried first; duplicate URLs are removed.
 http://85.209.156.148:1080
 socks5h://5.255.99.75:1080
+# Existing reserve: timed out on 2026-10-11; TLS safety could not be assessed.
 socks5h://213.176.74.119:1080
+# Added 2026-10-11: HTTPS verified, fallback search API returned ads twice.
+socks5h://79.137.198.71:7777
+socks5h://5.255.103.55:1080
+socks5h://45.114.60.178:1080
