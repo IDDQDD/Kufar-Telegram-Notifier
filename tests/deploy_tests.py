@@ -63,7 +63,7 @@ esac
             encoding="utf-8", errors="replace", timeout=30,
         )
 
-    def test_netherlands_update_replaces_primary_and_overrides_preserving_other_settings(self):
+    def test_local_proxy_update_replaces_primary_and_overrides_preserving_other_settings(self):
         self.prepare()
         other = 'TELEGRAM_BOT_TOKEN="offline-test-secret"\nKEEP_SETTINGS=yes\n'
         original = (other + "KUFAR_PROXY='socks4://86.57.178.182:4153'\n"
@@ -73,21 +73,23 @@ esac
         (self.project / ".env").write_text(original, encoding="utf-8")
         cache = self.project / "data" / "cached-data.json"
         cache.write_text('{"keep":"history"}', encoding="utf-8")
-        result = self.run_update("--netherlands-proxies")
+        result = self.run_update("--local-proxy")
         self.assertEqual(result.returncode, 0, result.stderr)
         updated = (self.project / ".env").read_text()
         self.assertTrue(updated.startswith(other))
         self.assertEqual(updated.count("KUFAR_PROXY="), 1)
-        self.assertIn("KUFAR_PROXY=http://85.209.156.148:1080\n", updated)
-        self.assertNotIn("KUFAR_PROXY_POOL", updated)
+        self.assertIn("KUFAR_PROXY=socks5h://127.0.0.1:1080\n", updated)
+        self.assertEqual(updated.count("KUFAR_PROXY_POOL="), 1)
+        self.assertIn("KUFAR_PROXY_POOL=\n", updated)
+        self.assertNotIn("KUFAR_PROXY_POOL_FILE", updated)
         self.assertNotIn("178.124", updated)
         self.assertNotIn("86.57", updated)
         self.assertNotIn("offline-test-secret", result.stdout + result.stderr)
         self.assertEqual(cache.read_text(), '{"keep":"history"}')
-        backups = list(self.project.glob(".env.before-netherlands.*"))
+        backups = list(self.project.glob(".env.before-local-proxy.*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), original)
-        self.assertFalse(list(self.project.glob(".env.netherlands.*")))
+        self.assertFalse(list(self.project.glob(".env.local-proxy.*")))
 
     def test_normal_update_preserves_existing_proxy_settings(self):
         self.prepare()
@@ -96,15 +98,15 @@ esac
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.project / ".env").read_text(), original)
-        self.assertFalse(list(self.project.glob(".env.before-netherlands.*")))
+        self.assertFalse(list(self.project.glob(".env.before-local-proxy.*")))
 
-    def test_netherlands_update_rejects_missing_env_or_extra_arguments(self):
-        result = self.run_update("--netherlands-proxies")
+    def test_local_proxy_update_rejects_missing_env_or_extra_arguments(self):
+        result = self.run_update("--local-proxy")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.project / ".env").exists())
         self.prepare()
         original = (self.project / ".env").read_bytes()
-        result = self.run_update("--netherlands-proxies", "--unknown")
+        result = self.run_update("--local-proxy", "--unknown")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.project / ".env").read_bytes(), original)
 

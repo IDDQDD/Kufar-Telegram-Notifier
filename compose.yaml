@@ -1,6 +1,8 @@
 services:
   bot:
     build: .
+    # Reach the SOCKS proxy listening on the Linux host's loopback interface.
+    network_mode: host
     restart: unless-stopped
     init: true
     mem_limit: 512m
